@@ -1770,7 +1770,7 @@ var CreditSystemClient = class extends EventEmitter {
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
                   ...data.userState.orgLogoUrl !== void 0 && { logo_url: data.userState.orgLogoUrl },
-                  ...data.userState.orgIconUrl !== void 0 && { icon_url: data.userState.orgIconUrl },
+                  ...data.userState.orgIcon !== void 0 && { org_icon: data.userState.orgIcon },
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds || updatedOrganizations[orgIndex].user_role_ids
                 };
@@ -1782,7 +1782,7 @@ var CreditSystemClient = class extends EventEmitter {
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
                   logo_url: data.userState.orgLogoUrl,
-                  icon_url: data.userState.orgIconUrl,
+                  org_icon: data.userState.orgIcon,
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds
                 });
@@ -1797,8 +1797,8 @@ var CreditSystemClient = class extends EventEmitter {
               ...data.userState.userRoleIds && { userRoleIds: data.userState.userRoleIds },
               // Update superadmin flag if provided
               ...data.userState.isSuperAdmin !== void 0 && { is_superadmin: data.userState.isSuperAdmin },
-              // Update avatar URL if provided
-              ...data.userState.avatarUrl !== void 0 && { avatar_url: data.userState.avatarUrl }
+              // Update profile image if provided
+              ...data.userState.profileImage !== void 0 && { profile_image: data.userState.profileImage }
             };
             if (data.userState.isSuperAdmin !== void 0) {
               this.state.isSuperAdmin = data.userState.isSuperAdmin;

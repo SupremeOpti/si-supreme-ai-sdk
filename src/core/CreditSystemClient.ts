@@ -1321,7 +1321,7 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
                   ...(data.userState.orgLogoUrl !== undefined && { logo_url: data.userState.orgLogoUrl }),
-                  ...(data.userState.orgIconUrl !== undefined && { icon_url: data.userState.orgIconUrl }),
+                  ...(data.userState.orgIcon !== undefined && { org_icon: data.userState.orgIcon }),
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds || updatedOrganizations[orgIndex].user_role_ids
                 };
@@ -1334,7 +1334,7 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
                   logo_url: data.userState.orgLogoUrl,
-                  icon_url: data.userState.orgIconUrl,
+                  org_icon: data.userState.orgIcon,
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds
                 });
@@ -1351,8 +1351,8 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
               ...(data.userState.userRoleIds && { userRoleIds: data.userState.userRoleIds }),
               // Update superadmin flag if provided
               ...(data.userState.isSuperAdmin !== undefined && { is_superadmin: data.userState.isSuperAdmin }),
-              // Update avatar URL if provided
-              ...(data.userState.avatarUrl !== undefined && { avatar_url: data.userState.avatarUrl })
+              // Update profile image if provided
+              ...(data.userState.profileImage !== undefined && { profile_image: data.userState.profileImage })
             };
 
             // Sync isSuperAdmin to SDK state

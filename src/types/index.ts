@@ -10,7 +10,7 @@ export interface Organization {
   domain?: string;
   drive_folder_id?: string | null;
   logo_url?: string | null;
-  icon_url?: string | null;
+  org_icon?: string | null;
   selectedStatus?: boolean;
   isSelected?: boolean;
   credits?: number;
@@ -27,7 +27,7 @@ export interface User {
   id: number;
   email: string;
   name?: string;
-  avatar_url?: string | null;
+  profile_image?: string | null;
   is_superadmin?: boolean;
   organizations?: Organization[];
   personas?: Array<{
@@ -169,12 +169,12 @@ export interface UserStateResponseMessage extends IframeMessage {
     orgDomain?: string;
     driveFolderId?: string | null;
     orgLogoUrl?: string | null;
-    orgIconUrl?: string | null;
+    orgIcon?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[]; // Array of role IDs (for consistency with JWT token response)
     isSuperAdmin?: boolean;
-    avatarUrl?: string | null;
+    profileImage?: string | null;
     personas?: any[];
   };
   error?: string;
@@ -405,12 +405,12 @@ export interface UserStateResult extends OperationResult {
     orgDomain?: string;
     driveFolderId?: string | null;
     orgLogoUrl?: string | null;
-    orgIconUrl?: string | null;
+    orgIcon?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[];
     isSuperAdmin?: boolean;
-    avatarUrl?: string | null;
+    profileImage?: string | null;
     personas?: any[];
   };
 }
