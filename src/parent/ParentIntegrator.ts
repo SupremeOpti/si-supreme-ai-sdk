@@ -17,12 +17,12 @@ export interface ParentConfig {
     orgDomain?: string;
     driveFolderId?: string | null;
     orgLogoUrl?: string | null;
-    orgIconUrl?: string | null;
+    orgIcon?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[];
     isSuperAdmin?: boolean;
-    avatarUrl?: string | null;
+    profileImage?: string | null;
     personas?: any[];
   } | null>;
   allowedOrigins?: string[];
