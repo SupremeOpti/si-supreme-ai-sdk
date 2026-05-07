@@ -10,6 +10,8 @@ interface Organization {
     slug?: string;
     domain?: string;
     drive_folder_id?: string | null;
+    logo_url?: string | null;
+    icon_url?: string | null;
     selectedStatus?: boolean;
     isSelected?: boolean;
     credits?: number;
@@ -24,6 +26,7 @@ interface User {
     id: number;
     email: string;
     name?: string;
+    avatar_url?: string | null;
     is_superadmin?: boolean;
     organizations?: Organization[];
     personas?: Array<{
@@ -86,6 +89,8 @@ interface CreditSDKConfig {
     storagePrefix?: string;
     mode?: 'auto' | 'embedded' | 'standalone';
     features?: SDKFeatures;
+    /** Enable deep linking: auto-detect SPA route changes and notify the parent frame. Only active in embedded mode. */
+    deepLinking?: boolean;
     onAuthRequired?: () => void;
     onTokenExpired?: () => void;
 }
@@ -145,13 +150,21 @@ interface UserStateResponseMessage extends IframeMessage {
         orgSlug?: string;
         orgDomain?: string;
         driveFolderId?: string | null;
+        orgLogoUrl?: string | null;
+        orgIconUrl?: string | null;
         userRole: string;
         userId: string;
         userRoleIds?: number[];
         isSuperAdmin?: boolean;
+        avatarUrl?: string | null;
         personas?: any[];
     };
     error?: string;
+}
+interface RouteChangedMessage extends IframeMessage {
+    type: 'ROUTE_CHANGED';
+    /** The full path including pathname, search params, and hash (e.g. "/posts/123?tab=comments#top") */
+    path: string;
 }
 type CreditSDKEvents = {
     'ready': {
@@ -215,6 +228,9 @@ type CreditSDKEvents = {
     'tokensUpdated': {
         accessToken: string;
         refreshToken?: string;
+    };
+    'routeChanged': {
+        path: string;
     };
 };
 interface ApiResponse<T = any> {
@@ -347,10 +363,13 @@ interface UserStateResult extends OperationResult {
         orgSlug?: string;
         orgDomain?: string;
         driveFolderId?: string | null;
+        orgLogoUrl?: string | null;
+        orgIconUrl?: string | null;
         userRole: string;
         userId: string;
         userRoleIds?: number[];
         isSuperAdmin?: boolean;
+        avatarUrl?: string | null;
         personas?: any[];
     };
 }
@@ -424,6 +443,11 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     private tokenTimer?;
     private balanceTimer?;
     private parentResponseReceived;
+    private lastPath;
+    private originalPushState?;
+    private originalReplaceState?;
+    private popstateHandler?;
+    private hashchangeHandler?;
     constructor(config?: CreditSDKConfig);
     /**
      * Initialize the credit system
@@ -478,6 +502,29 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
      * @param all - If true, fetches all agents for the organization. If false/undefined, fetches agents filtered by user's role IDs.
      */
     getAgents(all?: boolean): Promise<AgentsResult>;
+    /**
+     * Get the current full path (pathname + search + hash)
+     */
+    private getCurrentPath;
+    /**
+     * Start watching for route changes in the embedded app.
+     * Detects pushState, replaceState, and popstate (back/forward) navigation.
+     */
+    private startRouteWatcher;
+    /**
+     * Stop the route watcher and restore original history methods.
+     */
+    private stopRouteWatcher;
+    /**
+     * Check if the route has changed and notify the parent if so.
+     */
+    private checkRouteChange;
+    /**
+     * Notify the parent frame that the route has changed.
+     * Called automatically when deep linking is enabled, but can also be called manually.
+     * @param path - The path to send. Defaults to the current window path (pathname + search + hash).
+     */
+    notifyRouteChanged(path?: string): void;
     /**
      * Read personas from cookie
      */
@@ -621,9 +668,16 @@ interface ParentConfig {
     getCurrentUserState?: () => Promise<{
         orgId: string;
         orgName: string;
+        orgSlug?: string;
+        orgDomain?: string;
+        driveFolderId?: string | null;
+        orgLogoUrl?: string | null;
+        orgIconUrl?: string | null;
         userRole: string;
         userId: string;
         userRoleIds?: number[];
+        isSuperAdmin?: boolean;
+        avatarUrl?: string | null;
         personas?: any[];
     } | null>;
     allowedOrigins?: string[];
@@ -725,4 +779,4 @@ declare class ParentIntegrator {
  * @packageDocumentation
  */
 
-export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type RoleGroupedAgents, type SDKState, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UseCreditSystemReturn, type User, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
+export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UseCreditSystemReturn, type User, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };

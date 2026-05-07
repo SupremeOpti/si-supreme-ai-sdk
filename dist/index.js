@@ -760,6 +760,8 @@ var CreditSystemClient = class extends EventEmitter {
   constructor(config = {}) {
     super();
     this.parentResponseReceived = false;
+    // Deep linking / route watcher state
+    this.lastPath = "";
     this.debug = config.debug || false;
     this.config = {
       apiBaseUrl: config.apiBaseUrl || "/api/secure-credits/jwt",
@@ -781,6 +783,7 @@ var CreditSystemClient = class extends EventEmitter {
         personas: config.features?.personas !== false
         // Default true
       },
+      deepLinking: config.deepLinking || false,
       onAuthRequired: config.onAuthRequired || (() => {
       }),
       onTokenExpired: config.onTokenExpired || (() => {
@@ -1025,6 +1028,9 @@ var CreditSystemClient = class extends EventEmitter {
     }
     if (this.config.features.personas) {
       this.loadPersonas();
+    }
+    if (this.config.deepLinking && this.state.mode === "embedded") {
+      this.startRouteWatcher();
     }
     this.emit("ready", {
       user: this.state.user,
@@ -1512,6 +1518,84 @@ var CreditSystemClient = class extends EventEmitter {
     }
   }
   // ===================================================================
+  // DEEP LINKING METHODS
+  // ===================================================================
+  /**
+   * Get the current full path (pathname + search + hash)
+   */
+  getCurrentPath() {
+    return window.location.pathname + window.location.search + window.location.hash;
+  }
+  /**
+   * Start watching for route changes in the embedded app.
+   * Detects pushState, replaceState, and popstate (back/forward) navigation.
+   */
+  startRouteWatcher() {
+    this.lastPath = this.getCurrentPath();
+    this.log("\u{1F517} Deep linking enabled \u2014 starting route watcher");
+    this.popstateHandler = () => this.checkRouteChange();
+    window.addEventListener("popstate", this.popstateHandler);
+    this.hashchangeHandler = () => this.checkRouteChange();
+    window.addEventListener("hashchange", this.hashchangeHandler);
+    this.originalPushState = history.pushState.bind(history);
+    this.originalReplaceState = history.replaceState.bind(history);
+    const self = this;
+    history.pushState = function(...args) {
+      self.originalPushState(...args);
+      self.checkRouteChange();
+    };
+    history.replaceState = function(...args) {
+      self.originalReplaceState(...args);
+      self.checkRouteChange();
+    };
+    this.notifyRouteChanged(this.lastPath);
+  }
+  /**
+   * Stop the route watcher and restore original history methods.
+   */
+  stopRouteWatcher() {
+    if (this.popstateHandler) {
+      window.removeEventListener("popstate", this.popstateHandler);
+      this.popstateHandler = void 0;
+    }
+    if (this.hashchangeHandler) {
+      window.removeEventListener("hashchange", this.hashchangeHandler);
+      this.hashchangeHandler = void 0;
+    }
+    if (this.originalPushState) {
+      history.pushState = this.originalPushState;
+      this.originalPushState = void 0;
+    }
+    if (this.originalReplaceState) {
+      history.replaceState = this.originalReplaceState;
+      this.originalReplaceState = void 0;
+    }
+    this.log("\u{1F517} Deep linking route watcher stopped");
+  }
+  /**
+   * Check if the route has changed and notify the parent if so.
+   */
+  checkRouteChange() {
+    const currentPath = this.getCurrentPath();
+    if (currentPath !== this.lastPath) {
+      this.lastPath = currentPath;
+      this.notifyRouteChanged(currentPath);
+    }
+  }
+  /**
+   * Notify the parent frame that the route has changed.
+   * Called automatically when deep linking is enabled, but can also be called manually.
+   * @param path - The path to send. Defaults to the current window path (pathname + search + hash).
+   */
+  notifyRouteChanged(path) {
+    const resolvedPath = path ?? this.getCurrentPath();
+    this.log(`\u{1F517} Route changed: ${resolvedPath}`);
+    this.emit("routeChanged", { path: resolvedPath });
+    if (this.state.mode === "embedded") {
+      this.messageBridge.sendToParent("ROUTE_CHANGED", { path: resolvedPath });
+    }
+  }
+  // ===================================================================
   // PERSONAS METHODS
   // ===================================================================
   /**
@@ -1685,6 +1769,8 @@ var CreditSystemClient = class extends EventEmitter {
                   slug: data.userState.orgSlug,
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
+                  ...data.userState.orgLogoUrl !== void 0 && { logo_url: data.userState.orgLogoUrl },
+                  ...data.userState.orgIconUrl !== void 0 && { icon_url: data.userState.orgIconUrl },
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds || updatedOrganizations[orgIndex].user_role_ids
                 };
@@ -1695,6 +1781,8 @@ var CreditSystemClient = class extends EventEmitter {
                   slug: data.userState.orgSlug,
                   domain: data.userState.orgDomain,
                   drive_folder_id: data.userState.driveFolderId,
+                  logo_url: data.userState.orgLogoUrl,
+                  icon_url: data.userState.orgIconUrl,
                   selectedStatus: true,
                   user_role_ids: data.userState.userRoleIds
                 });
@@ -1708,7 +1796,9 @@ var CreditSystemClient = class extends EventEmitter {
               // Also update userRoleIds if provided (for consistency with JWT token response)
               ...data.userState.userRoleIds && { userRoleIds: data.userState.userRoleIds },
               // Update superadmin flag if provided
-              ...data.userState.isSuperAdmin !== void 0 && { is_superadmin: data.userState.isSuperAdmin }
+              ...data.userState.isSuperAdmin !== void 0 && { is_superadmin: data.userState.isSuperAdmin },
+              // Update avatar URL if provided
+              ...data.userState.avatarUrl !== void 0 && { avatar_url: data.userState.avatarUrl }
             };
             if (data.userState.isSuperAdmin !== void 0) {
               this.state.isSuperAdmin = data.userState.isSuperAdmin;
@@ -2155,6 +2245,7 @@ var CreditSystemClient = class extends EventEmitter {
    */
   destroy() {
     this.clearTimers();
+    this.stopRouteWatcher();
     this.messageBridge.destroy();
     this.removeAllListeners();
     this.state.isInitialized = false;

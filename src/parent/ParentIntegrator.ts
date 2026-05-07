@@ -13,9 +13,16 @@ export interface ParentConfig {
   getCurrentUserState?: () => Promise<{
     orgId: string;
     orgName: string;
+    orgSlug?: string;
+    orgDomain?: string;
+    driveFolderId?: string | null;
+    orgLogoUrl?: string | null;
+    orgIconUrl?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[];
+    isSuperAdmin?: boolean;
+    avatarUrl?: string | null;
     personas?: any[];
   } | null>;
   allowedOrigins?: string[];

@@ -9,6 +9,8 @@ export interface Organization {
   slug?: string;
   domain?: string;
   drive_folder_id?: string | null;
+  logo_url?: string | null;
+  icon_url?: string | null;
   selectedStatus?: boolean;
   isSelected?: boolean;
   credits?: number;
@@ -25,6 +27,7 @@ export interface User {
   id: number;
   email: string;
   name?: string;
+  avatar_url?: string | null;
   is_superadmin?: boolean;
   organizations?: Organization[];
   personas?: Array<{
@@ -165,10 +168,13 @@ export interface UserStateResponseMessage extends IframeMessage {
     orgSlug?: string;
     orgDomain?: string;
     driveFolderId?: string | null;
+    orgLogoUrl?: string | null;
+    orgIconUrl?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[]; // Array of role IDs (for consistency with JWT token response)
     isSuperAdmin?: boolean;
+    avatarUrl?: string | null;
     personas?: any[];
   };
   error?: string;
@@ -398,10 +404,13 @@ export interface UserStateResult extends OperationResult {
     orgSlug?: string;
     orgDomain?: string;
     driveFolderId?: string | null;
+    orgLogoUrl?: string | null;
+    orgIconUrl?: string | null;
     userRole: string;
     userId: string;
     userRoleIds?: number[];
     isSuperAdmin?: boolean;
+    avatarUrl?: string | null;
     personas?: any[];
   };
 }
