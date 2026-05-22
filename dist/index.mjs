@@ -722,6 +722,170 @@ var PersonasClient = class {
   }
 };
 
+// src/core/ReportsClient.ts
+var ReportsClient = class {
+  constructor(config) {
+    this.apiBaseUrl = config.apiBaseUrl.replace(/\/+$/, "");
+    this.getAuthToken = config.getAuthToken;
+    this.getDefaultOrganizationId = config.getDefaultOrganizationId;
+    this.debug = !!config.debug;
+  }
+  log(...args) {
+    if (this.debug) {
+      console.log("[ReportsClient]", ...args);
+    }
+  }
+  resolveOrgId(explicit) {
+    if (explicit !== void 0 && explicit !== null && explicit !== "") {
+      return String(explicit);
+    }
+    const fallback = this.getDefaultOrganizationId?.();
+    if (fallback !== void 0 && fallback !== null && fallback !== "") {
+      return String(fallback);
+    }
+    return void 0;
+  }
+  async request(method, path, options = {}) {
+    const token = this.getAuthToken();
+    if (!token) {
+      return { ok: false, status: 401, data: { error: "Authentication required" } };
+    }
+    let url = `${this.apiBaseUrl}${path}`;
+    if (options.params && Object.keys(options.params).length > 0) {
+      const qs = new URLSearchParams(options.params).toString();
+      url += `?${qs}`;
+    }
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    };
+    const init = { method, headers };
+    if (options.body !== void 0 && (method === "POST" || method === "PATCH")) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(options.body);
+    }
+    this.log(`\u{1F4E1} ${method} ${url}`);
+    try {
+      const response = await fetch(url, init);
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+      }
+      this.log(`\u21A9\uFE0F  ${response.status} ${response.ok ? "OK" : "ERROR"}`);
+      return { ok: response.ok, status: response.status, data };
+    } catch (error) {
+      this.log(`\u274C Network error: ${error?.message || error}`);
+      return {
+        ok: false,
+        status: 0,
+        data: { error: error?.message || "Network error" }
+      };
+    }
+  }
+  errorFrom(raw, fallback) {
+    if (raw.data && typeof raw.data === "object") {
+      if (typeof raw.data.error === "string") return raw.data.error;
+      if (typeof raw.data.message === "string") return raw.data.message;
+    }
+    if (raw.status) return `${fallback} (${raw.status})`;
+    return fallback;
+  }
+  /**
+   * List the authenticated user's reports. Cursor-paginated.
+   */
+  async listReports(params = {}) {
+    const orgId = this.resolveOrgId(params.organizationId);
+    const query = {};
+    if (orgId) query.organization_id = orgId;
+    if (params.folderId !== void 0 && params.folderId !== null && params.folderId !== "") {
+      query.folder_id = String(params.folderId);
+    }
+    if (params.cursor) query.cursor = params.cursor;
+    if (params.perPage !== void 0 && params.perPage !== null) {
+      query.per_page = String(params.perPage);
+    }
+    const raw = await this.request("GET", "", { params: query });
+    if (raw.ok && raw.data?.success) {
+      return {
+        success: true,
+        reports: Array.isArray(raw.data.reports) ? raw.data.reports : [],
+        nextCursor: raw.data.next_cursor ?? null
+      };
+    }
+    return {
+      success: false,
+      error: this.errorFrom(raw, "Failed to list reports"),
+      reports: []
+    };
+  }
+  /**
+   * Fetch a single report (including its HTML body).
+   */
+  async getReport(id, options = {}) {
+    const orgId = this.resolveOrgId(options.organizationId);
+    const query = {};
+    if (orgId) query.organization_id = orgId;
+    const raw = await this.request("GET", `/${encodeURIComponent(String(id))}`, { params: query });
+    if (raw.ok && raw.data?.success && raw.data.report) {
+      return { success: true, report: raw.data.report };
+    }
+    return {
+      success: false,
+      error: this.errorFrom(raw, "Failed to fetch report"),
+      validationErrors: raw.data?.errors
+    };
+  }
+  /**
+   * Create a report owned by the authenticated user.
+   */
+  async createReport(params) {
+    const orgId = this.resolveOrgId(params.organizationId);
+    const body = {
+      title: params.title,
+      body: params.body,
+      visibility: params.visibility
+    };
+    if (orgId !== void 0) body.organization_id = Number(orgId) || orgId;
+    if (params.folderId !== void 0 && params.folderId !== null) body.folder_id = params.folderId;
+    if (params.pinned !== void 0) body.pinned = params.pinned;
+    if (params.includeBody !== void 0) body.include_body = params.includeBody;
+    const raw = await this.request("POST", "", { body });
+    if (raw.ok && raw.data?.success && raw.data.report) {
+      return { success: true, report: raw.data.report };
+    }
+    return {
+      success: false,
+      error: this.errorFrom(raw, "Failed to create report"),
+      validationErrors: raw.data?.errors
+    };
+  }
+  /**
+   * Partially update a report. Only the authenticated user's own reports can
+   * be updated (server-enforced); other reports return 403.
+   */
+  async updateReport(id, params) {
+    const orgId = this.resolveOrgId(params.organizationId);
+    const body = {};
+    if (params.title !== void 0) body.title = params.title;
+    if (params.body !== void 0) body.body = params.body;
+    if (params.visibility !== void 0) body.visibility = params.visibility;
+    if (params.folderId !== void 0) body.folder_id = params.folderId;
+    if (params.pinned !== void 0) body.pinned = params.pinned;
+    if (params.includeBody !== void 0) body.include_body = params.includeBody;
+    if (orgId !== void 0) body.organization_id = Number(orgId) || orgId;
+    const raw = await this.request("PATCH", `/${encodeURIComponent(String(id))}`, { body });
+    if (raw.ok && raw.data?.success && raw.data.report) {
+      return { success: true, report: raw.data.report };
+    }
+    return {
+      success: false,
+      error: this.errorFrom(raw, "Failed to update report"),
+      validationErrors: raw.data?.errors
+    };
+  }
+};
+
 // src/core/CreditSystemClient.ts
 var CreditSystemClient = class extends EventEmitter {
   constructor(config = {}) {
@@ -730,9 +894,12 @@ var CreditSystemClient = class extends EventEmitter {
     // Deep linking / route watcher state
     this.lastPath = "";
     this.debug = config.debug || false;
+    const apiBaseUrl = config.apiBaseUrl || "/api/secure-credits/jwt";
+    const reportsApiBaseUrl = config.reportsApiBaseUrl || `${apiBaseUrl.replace("/secure-credits/jwt", "")}/reports/jwt`;
     this.config = {
-      apiBaseUrl: config.apiBaseUrl || "/api/secure-credits/jwt",
+      apiBaseUrl,
       agentsApiBaseUrl: config.agentsApiBaseUrl || "/api/ai-agents/jwt",
+      reportsApiBaseUrl,
       authUrl: config.authUrl || "/api/jwt",
       parentTimeout: config.parentTimeout || 3e3,
       tokenRefreshInterval: config.tokenRefreshInterval || 6e5,
@@ -747,7 +914,9 @@ var CreditSystemClient = class extends EventEmitter {
       features: {
         credits: config.features?.credits !== false,
         // Default true
-        personas: config.features?.personas !== false
+        personas: config.features?.personas !== false,
+        // Default true
+        reports: config.features?.reports !== false
         // Default true
       },
       deepLinking: config.deepLinking || false,
@@ -779,6 +948,12 @@ var CreditSystemClient = class extends EventEmitter {
     this.personasClient = new PersonasClient({
       apiBaseUrl: personasBaseUrl,
       getAuthToken: () => this.getAuthToken(),
+      debug: this.config.debug
+    });
+    this.reportsClient = new ReportsClient({
+      apiBaseUrl: this.config.reportsApiBaseUrl,
+      getAuthToken: () => this.getAuthToken(),
+      getDefaultOrganizationId: () => this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
       debug: this.config.debug
     });
     this.setupEventHandlers();
@@ -1682,6 +1857,90 @@ var CreditSystemClient = class extends EventEmitter {
     return await this.personasClient.getPersonaById(id);
   }
   // ===================================================================
+  // REPORTS METHODS
+  //
+  // Strict creator-only: every call is scoped to the authenticated user
+  // via the JWT bearer token. The server rejects any attempt to read or
+  // edit a report created by someone else. The SDK never exposes a
+  // creator/user ID parameter — there is no way for a caller to operate
+  // on another user's reports through this surface.
+  // ===================================================================
+  /**
+   * List the authenticated user's reports (cursor-paginated).
+   * Defaults `organization_id` to the SDK's currently selected organization.
+   */
+  async listReports(params = {}) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F listReports blocked: Not authenticated");
+      return { success: false, error: "Not authenticated", reports: [] };
+    }
+    this.log("\u{1F4C4} Listing reports...", params);
+    const result = await this.reportsClient.listReports(params);
+    if (result.success) {
+      this.log(`\u2705 Listed ${result.reports?.length ?? 0} reports (nextCursor: ${result.nextCursor ?? "null"})`);
+    } else {
+      this.log(`\u274C listReports failed: ${result.error}`);
+      this.emit("error", { type: "reports", error: result.error || "Failed to list reports" });
+    }
+    return result;
+  }
+  /**
+   * Fetch one of the authenticated user's reports (including the HTML body).
+   */
+  async getReport(id, organizationId) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F getReport blocked: Not authenticated");
+      return { success: false, error: "Not authenticated" };
+    }
+    this.log(`\u{1F4C4} Fetching report ${id}`);
+    const result = await this.reportsClient.getReport(id, { organizationId });
+    if (result.success) {
+      this.log(`\u2705 Fetched report ${id}: "${result.report?.title}"`);
+    } else {
+      this.log(`\u274C getReport(${id}) failed: ${result.error}`);
+      this.emit("error", { type: "reports", error: result.error || "Failed to fetch report" });
+    }
+    return result;
+  }
+  /**
+   * Create a report owned by the authenticated user. The server stamps
+   * `created_by` from the JWT — the caller cannot impersonate anyone else.
+   */
+  async createReport(params) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F createReport blocked: Not authenticated");
+      return { success: false, error: "Not authenticated" };
+    }
+    this.log(`\u{1F4C4} Creating report "${params.title}" (visibility: ${params.visibility})`);
+    const result = await this.reportsClient.createReport(params);
+    if (result.success) {
+      this.log(`\u2705 Created report ${result.report?.id}`);
+    } else {
+      this.log(`\u274C createReport failed: ${result.error}`);
+      this.emit("error", { type: "reports", error: result.error || "Failed to create report" });
+    }
+    return result;
+  }
+  /**
+   * Partial update — any subset of `{title, body, visibility, folderId, pinned}`.
+   * Server returns 403 if the report exists but was created by someone else.
+   */
+  async updateReport(id, params) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F updateReport blocked: Not authenticated");
+      return { success: false, error: "Not authenticated" };
+    }
+    this.log(`\u{1F4C4} Updating report ${id}`, Object.keys(params));
+    const result = await this.reportsClient.updateReport(id, params);
+    if (result.success) {
+      this.log(`\u2705 Updated report ${id}`);
+    } else {
+      this.log(`\u274C updateReport(${id}) failed: ${result.error}`);
+      this.emit("error", { type: "reports", error: result.error || "Failed to update report" });
+    }
+    return result;
+  }
+  // ===================================================================
   // USER STATE METHODS
   // ===================================================================
   /**
@@ -2430,6 +2689,30 @@ function useCreditSystem(config) {
     }
     return await clientRef.current.switchOrganization(orgId);
   }, []);
+  const listReports = useCallback(async (params) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized", reports: [] };
+    }
+    return await clientRef.current.listReports(params);
+  }, []);
+  const getReport = useCallback(async (id, organizationId) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.getReport(id, organizationId);
+  }, []);
+  const createReport = useCallback(async (params) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.createReport(params);
+  }, []);
+  const updateReport = useCallback(async (id, params) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.updateReport(id, params);
+  }, []);
   return {
     isInitialized,
     isAuthenticated,
@@ -2456,7 +2739,11 @@ function useCreditSystem(config) {
     requestCurrentUserState,
     requestUserOrganizations,
     requestUserPersonas,
-    switchOrganization
+    switchOrganization,
+    listReports,
+    getReport,
+    createReport,
+    updateReport
   };
 }
 
@@ -2798,6 +3085,7 @@ export {
   CreditSystemProvider,
   ParentIntegrator,
   PersonasClient,
+  ReportsClient,
   index_default as default,
   useCreditContext,
   useCreditSystem,
