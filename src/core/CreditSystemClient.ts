@@ -8,6 +8,7 @@ import { AuthManager } from '../utils/AuthManager';
 import { ApiClient } from '../utils/ApiClient';
 import { StorageManager } from '../utils/StorageManager';
 import { PersonasClient } from './PersonasClient';
+import { ReportsClient } from './ReportsClient';
 import type {
   CreditSDKConfig,
   SDKState,
@@ -26,7 +27,12 @@ import type {
   UserStateResponseMessage,
   UserStateResult,
   AgentsResult,
-  SwitchOrgResult
+  SwitchOrgResult,
+  ListReportsParams,
+  CreateReportParams,
+  UpdateReportParams,
+  ReportsResult,
+  ReportResult
 } from '../types';
 
 export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
@@ -38,6 +44,7 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   private apiClient: ApiClient;
   private agentsApiClient: ApiClient;
   private personasClient: PersonasClient;
+  private reportsClient: ReportsClient;
   private tokenTimer?: NodeJS.Timeout;
   private balanceTimer?: NodeJS.Timeout;
   private parentResponseReceived = false;
@@ -56,9 +63,15 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     this.debug = config.debug || false;
 
     // Configuration with defaults
+    const apiBaseUrl = config.apiBaseUrl || '/api/secure-credits/jwt';
+    const reportsApiBaseUrl =
+      config.reportsApiBaseUrl ||
+      `${apiBaseUrl.replace('/secure-credits/jwt', '')}/reports/jwt`;
+
     this.config = {
-      apiBaseUrl: config.apiBaseUrl || '/api/secure-credits/jwt',
+      apiBaseUrl,
       agentsApiBaseUrl: config.agentsApiBaseUrl || '/api/ai-agents/jwt',
+      reportsApiBaseUrl,
       authUrl: config.authUrl || '/api/jwt',
       parentTimeout: config.parentTimeout || 3000,
       tokenRefreshInterval: config.tokenRefreshInterval || 600000, // 10 minutes
@@ -70,7 +83,8 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
       mode: config.mode || 'auto',
       features: {
         credits: config.features?.credits !== false, // Default true
-        personas: config.features?.personas !== false // Default true
+        personas: config.features?.personas !== false, // Default true
+        reports: config.features?.reports !== false // Default true
       },
       deepLinking: config.deepLinking || false,
       onAuthRequired: config.onAuthRequired || (() => {}),
@@ -105,6 +119,16 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     this.personasClient = new PersonasClient({
       apiBaseUrl: personasBaseUrl,
       getAuthToken: () => this.getAuthToken(),
+      debug: this.config.debug
+    });
+
+    // Initialize ReportsClient. Always scoped to the authed user via JWT —
+    // the server enforces strict creator-only on reads and writes.
+    this.reportsClient = new ReportsClient({
+      apiBaseUrl: this.config.reportsApiBaseUrl,
+      getAuthToken: () => this.getAuthToken(),
+      getDefaultOrganizationId: () =>
+        this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
       debug: this.config.debug
     });
 
@@ -1249,6 +1273,107 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
 
     this.log(`🎭 Fetching persona ID: ${id}`);
     return await this.personasClient.getPersonaById(id);
+  }
+
+  // ===================================================================
+  // REPORTS METHODS
+  //
+  // Strict creator-only: every call is scoped to the authenticated user
+  // via the JWT bearer token. The server rejects any attempt to read or
+  // edit a report created by someone else. The SDK never exposes a
+  // creator/user ID parameter — there is no way for a caller to operate
+  // on another user's reports through this surface.
+  // ===================================================================
+
+  /**
+   * List the authenticated user's reports (cursor-paginated).
+   * Defaults `organization_id` to the SDK's currently selected organization.
+   */
+  async listReports(params: ListReportsParams = {}): Promise<ReportsResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ listReports blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated', reports: [] };
+    }
+
+    this.log('📄 Listing reports...', params);
+    const result = await this.reportsClient.listReports(params);
+
+    if (result.success) {
+      this.log(`✅ Listed ${result.reports?.length ?? 0} reports (nextCursor: ${result.nextCursor ?? 'null'})`);
+    } else {
+      this.log(`❌ listReports failed: ${result.error}`);
+      this.emit('error', { type: 'reports', error: result.error || 'Failed to list reports' });
+    }
+
+    return result;
+  }
+
+  /**
+   * Fetch one of the authenticated user's reports (including the HTML body).
+   */
+  async getReport(id: number | string, organizationId?: string | number): Promise<ReportResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ getReport blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    this.log(`📄 Fetching report ${id}`);
+    const result = await this.reportsClient.getReport(id, { organizationId });
+
+    if (result.success) {
+      this.log(`✅ Fetched report ${id}: "${result.report?.title}"`);
+    } else {
+      this.log(`❌ getReport(${id}) failed: ${result.error}`);
+      this.emit('error', { type: 'reports', error: result.error || 'Failed to fetch report' });
+    }
+
+    return result;
+  }
+
+  /**
+   * Create a report owned by the authenticated user. The server stamps
+   * `created_by` from the JWT — the caller cannot impersonate anyone else.
+   */
+  async createReport(params: CreateReportParams): Promise<ReportResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ createReport blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    this.log(`📄 Creating report "${params.title}" (visibility: ${params.visibility})`);
+    const result = await this.reportsClient.createReport(params);
+
+    if (result.success) {
+      this.log(`✅ Created report ${result.report?.id}`);
+    } else {
+      this.log(`❌ createReport failed: ${result.error}`);
+      this.emit('error', { type: 'reports', error: result.error || 'Failed to create report' });
+    }
+
+    return result;
+  }
+
+  /**
+   * Partial update — any subset of `{title, body, visibility, folderId, pinned}`.
+   * Server returns 403 if the report exists but was created by someone else.
+   */
+  async updateReport(id: number | string, params: UpdateReportParams): Promise<ReportResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ updateReport blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    this.log(`📄 Updating report ${id}`, Object.keys(params));
+    const result = await this.reportsClient.updateReport(id, params);
+
+    if (result.success) {
+      this.log(`✅ Updated report ${id}`);
+    } else {
+      this.log(`❌ updateReport(${id}) failed: ${result.error}`);
+      this.emit('error', { type: 'reports', error: result.error || 'Failed to update report' });
+    }
+
+    return result;
   }
 
   // ===================================================================

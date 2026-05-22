@@ -21,7 +21,12 @@ import type {
   UserStateResult,
   UserOrgsResult,
   UserPersonasResult,
-  SwitchOrgResult
+  SwitchOrgResult,
+  ListReportsParams,
+  CreateReportParams,
+  UpdateReportParams,
+  ReportsResult,
+  ReportResult
 } from '../types';
 
 export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn {
@@ -314,6 +319,42 @@ export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn
     return await clientRef.current.switchOrganization(orgId);
   }, []);
 
+  // --- Reports (always scoped to the authed user via JWT) ---
+
+  const listReports = useCallback(async (params?: ListReportsParams): Promise<ReportsResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized', reports: [] };
+    }
+    return await clientRef.current.listReports(params);
+  }, []);
+
+  const getReport = useCallback(async (
+    id: number | string,
+    organizationId?: string | number
+  ): Promise<ReportResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.getReport(id, organizationId);
+  }, []);
+
+  const createReport = useCallback(async (params: CreateReportParams): Promise<ReportResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.createReport(params);
+  }, []);
+
+  const updateReport = useCallback(async (
+    id: number | string,
+    params: UpdateReportParams
+  ): Promise<ReportResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.updateReport(id, params);
+  }, []);
+
   return {
     isInitialized,
     isAuthenticated,
@@ -340,6 +381,10 @@ export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn
     requestCurrentUserState,
     requestUserOrganizations,
     requestUserPersonas,
-    switchOrganization
+    switchOrganization,
+    listReports,
+    getReport,
+    createReport,
+    updateReport
   };
 }

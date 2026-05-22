@@ -7,9 +7,12 @@
 // Core imports and exports
 import { CreditSystemClient } from './core/CreditSystemClient';
 import { PersonasClient } from './core/PersonasClient';
+import { ReportsClient } from './core/ReportsClient';
 export { CreditSystemClient };
 export { PersonasClient };
+export { ReportsClient };
 export type { PersonasClientConfig } from './core/PersonasClient';
+export type { ReportsClientConfig } from './core/ReportsClient';
 
 // React exports
 export { useCreditSystem } from './react/useCreditSystem';
@@ -74,6 +77,16 @@ export type {
   Agent,
   AgentsResult,
   RoleGroupedAgents,
+
+  // Reports
+  Report,
+  ReportSummary,
+  ReportVisibility,
+  ListReportsParams,
+  CreateReportParams,
+  UpdateReportParams,
+  ReportsResult,
+  ReportResult,
 
   // React
   UseCreditSystemReturn

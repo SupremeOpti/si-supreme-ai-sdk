@@ -84,11 +84,17 @@ export interface TransactionHistory {
 export interface SDKFeatures {
   credits?: boolean;
   personas?: boolean;
+  reports?: boolean;
 }
 
 export interface CreditSDKConfig {
   apiBaseUrl?: string;
   agentsApiBaseUrl?: string;
+  /**
+   * Base URL for the Reports JWT API. Defaults to `${apiBaseUrl without /secure-credits/jwt}/reports/jwt`,
+   * i.e. `/api/reports/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
+   */
+  reportsApiBaseUrl?: string;
   authUrl?: string;
   parentTimeout?: number;
   tokenRefreshInterval?: number;
@@ -375,6 +381,11 @@ export interface UseCreditSystemReturn {
   requestUserOrganizations: () => Promise<UserOrgsResult>;
   requestUserPersonas: () => Promise<UserPersonasResult>;
   switchOrganization: (orgId: string) => Promise<SwitchOrgResult>;
+  // Reports — always scoped to the authenticated user (server enforces strict creator-only).
+  listReports: (params?: ListReportsParams) => Promise<ReportsResult>;
+  getReport: (id: number | string, organizationId?: string | number) => Promise<ReportResult>;
+  createReport: (params: CreateReportParams) => Promise<ReportResult>;
+  updateReport: (id: number | string, params: UpdateReportParams) => Promise<ReportResult>;
 }
 
 // Persona Types
@@ -442,4 +453,75 @@ export interface AgentsResult extends OperationResult {
   agents?: Agent[];
   roleGrouped?: RoleGroupedAgents;
   total?: number;
+}
+
+// Reports Types
+//
+// All reports operations are scoped to the authenticated user via JWT.
+// The server enforces strict creator-only access: a user can only ever read,
+// list, create, or update reports they created themselves. The SDK never
+// accepts a creator/user ID — the JWT identifies the user.
+export type ReportVisibility = 'inherit' | 'personal' | 'internal' | 'client' | 'public';
+
+export interface ReportSummary {
+  id: number;
+  organization_id: number;
+  folder_id: number | null;
+  title: string;
+  visibility: ReportVisibility;
+  pinned: boolean;
+  url: string;
+  created_at: string;
+  updated_at: string;
+  edited_at: string | null;
+}
+
+export interface Report extends ReportSummary {
+  /** HTML body fragment. Always returned by GET /{id}. Omitted from list responses and from create/update unless `includeBody: true` is passed. */
+  body?: string;
+}
+
+export interface ListReportsParams {
+  /** Defaults to the SDK's currently selected organization. */
+  organizationId?: string | number;
+  folderId?: string | number | null;
+  cursor?: string;
+  /** Default 25, max 100 (server enforced). */
+  perPage?: number;
+}
+
+export interface CreateReportParams {
+  title: string;
+  body: string;
+  visibility: ReportVisibility;
+  folderId?: number | null;
+  pinned?: boolean;
+  /** When true, the server echoes the persisted HTML body back. Defaults to false to avoid large payloads. */
+  includeBody?: boolean;
+  /** Defaults to the SDK's currently selected organization. */
+  organizationId?: string | number;
+}
+
+export interface UpdateReportParams {
+  title?: string;
+  body?: string;
+  visibility?: ReportVisibility;
+  folderId?: number | null;
+  pinned?: boolean;
+  /** When true, the server echoes the persisted HTML body back. Defaults to false to avoid large payloads. */
+  includeBody?: boolean;
+  /** Defaults to the SDK's currently selected organization. */
+  organizationId?: string | number;
+}
+
+export interface ReportsResult extends OperationResult {
+  reports?: Report[];
+  /** Opaque cursor for the next page, or null when there are no more pages. */
+  nextCursor?: string | null;
+}
+
+export interface ReportResult extends OperationResult {
+  report?: Report;
+  /** Populated on 422 responses: `{ field: [messages, ...] }`. */
+  validationErrors?: Record<string, string[]>;
 }

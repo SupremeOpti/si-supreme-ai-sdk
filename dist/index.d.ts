@@ -75,10 +75,16 @@ interface TransactionHistory {
 interface SDKFeatures {
     credits?: boolean;
     personas?: boolean;
+    reports?: boolean;
 }
 interface CreditSDKConfig {
     apiBaseUrl?: string;
     agentsApiBaseUrl?: string;
+    /**
+     * Base URL for the Reports JWT API. Defaults to `${apiBaseUrl without /secure-credits/jwt}/reports/jwt`,
+     * i.e. `/api/reports/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
+     */
+    reportsApiBaseUrl?: string;
     authUrl?: string;
     parentTimeout?: number;
     tokenRefreshInterval?: number;
@@ -340,6 +346,10 @@ interface UseCreditSystemReturn {
     requestUserOrganizations: () => Promise<UserOrgsResult>;
     requestUserPersonas: () => Promise<UserPersonasResult>;
     switchOrganization: (orgId: string) => Promise<SwitchOrgResult>;
+    listReports: (params?: ListReportsParams) => Promise<ReportsResult>;
+    getReport: (id: number | string, organizationId?: string | number) => Promise<ReportResult>;
+    createReport: (params: CreateReportParams) => Promise<ReportResult>;
+    updateReport: (id: number | string, params: UpdateReportParams) => Promise<ReportResult>;
 }
 interface Persona {
     id: number;
@@ -397,6 +407,63 @@ interface AgentsResult extends OperationResult {
     roleGrouped?: RoleGroupedAgents;
     total?: number;
 }
+type ReportVisibility = 'inherit' | 'personal' | 'internal' | 'client' | 'public';
+interface ReportSummary {
+    id: number;
+    organization_id: number;
+    folder_id: number | null;
+    title: string;
+    visibility: ReportVisibility;
+    pinned: boolean;
+    url: string;
+    created_at: string;
+    updated_at: string;
+    edited_at: string | null;
+}
+interface Report extends ReportSummary {
+    /** HTML body fragment. Always returned by GET /{id}. Omitted from list responses and from create/update unless `includeBody: true` is passed. */
+    body?: string;
+}
+interface ListReportsParams {
+    /** Defaults to the SDK's currently selected organization. */
+    organizationId?: string | number;
+    folderId?: string | number | null;
+    cursor?: string;
+    /** Default 25, max 100 (server enforced). */
+    perPage?: number;
+}
+interface CreateReportParams {
+    title: string;
+    body: string;
+    visibility: ReportVisibility;
+    folderId?: number | null;
+    pinned?: boolean;
+    /** When true, the server echoes the persisted HTML body back. Defaults to false to avoid large payloads. */
+    includeBody?: boolean;
+    /** Defaults to the SDK's currently selected organization. */
+    organizationId?: string | number;
+}
+interface UpdateReportParams {
+    title?: string;
+    body?: string;
+    visibility?: ReportVisibility;
+    folderId?: number | null;
+    pinned?: boolean;
+    /** When true, the server echoes the persisted HTML body back. Defaults to false to avoid large payloads. */
+    includeBody?: boolean;
+    /** Defaults to the SDK's currently selected organization. */
+    organizationId?: string | number;
+}
+interface ReportsResult extends OperationResult {
+    reports?: Report[];
+    /** Opaque cursor for the next page, or null when there are no more pages. */
+    nextCursor?: string | null;
+}
+interface ReportResult extends OperationResult {
+    report?: Report;
+    /** Populated on 422 responses: `{ field: [messages, ...] }`. */
+    validationErrors?: Record<string, string[]>;
+}
 
 /**
  * Type-safe EventEmitter implementation
@@ -440,6 +507,7 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     private apiClient;
     private agentsApiClient;
     private personasClient;
+    private reportsClient;
     private tokenTimer?;
     private balanceTimer?;
     private parentResponseReceived;
@@ -548,6 +616,25 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
      */
     getPersonaById(id: number): Promise<PersonaResult>;
     /**
+     * List the authenticated user's reports (cursor-paginated).
+     * Defaults `organization_id` to the SDK's currently selected organization.
+     */
+    listReports(params?: ListReportsParams): Promise<ReportsResult>;
+    /**
+     * Fetch one of the authenticated user's reports (including the HTML body).
+     */
+    getReport(id: number | string, organizationId?: string | number): Promise<ReportResult>;
+    /**
+     * Create a report owned by the authenticated user. The server stamps
+     * `created_by` from the JWT — the caller cannot impersonate anyone else.
+     */
+    createReport(params: CreateReportParams): Promise<ReportResult>;
+    /**
+     * Partial update — any subset of `{title, body, visibility, folderId, pinned}`.
+     * Server returns 403 if the report exists but was created by someone else.
+     */
+    updateReport(id: number | string, params: UpdateReportParams): Promise<ReportResult>;
+    /**
      * Request current user state from parent page (embedded mode only)
      */
     requestCurrentUserState(): Promise<UserStateResult>;
@@ -631,6 +718,55 @@ declare class PersonasClient {
      * Get a specific persona by ID
      */
     getPersonaById(id: number): Promise<PersonaResult>;
+}
+
+/**
+ * ReportsClient — JWT-authenticated REST client for `/api/reports/jwt/*`.
+ *
+ * Strict creator-only: the server gates every request on the authenticated
+ * user (the JWT subject), so all reads/writes from this client are implicitly
+ * scoped to "reports the current user created". The client does NOT accept a
+ * creator/user ID — there is no way to operate on another user's reports via
+ * this surface, by design.
+ */
+
+interface ReportsClientConfig {
+    /** Base URL for the reports API, e.g. `/api/reports/jwt`. Trailing slash is tolerated. */
+    apiBaseUrl: string;
+    getAuthToken: () => string | null;
+    /** Resolver for the default organization_id when callers don't pass one explicitly. */
+    getDefaultOrganizationId?: () => string | number | null | undefined;
+    debug?: boolean;
+}
+declare class ReportsClient {
+    private apiBaseUrl;
+    private getAuthToken;
+    private getDefaultOrganizationId?;
+    private debug;
+    constructor(config: ReportsClientConfig);
+    private log;
+    private resolveOrgId;
+    private request;
+    private errorFrom;
+    /**
+     * List the authenticated user's reports. Cursor-paginated.
+     */
+    listReports(params?: ListReportsParams): Promise<ReportsResult>;
+    /**
+     * Fetch a single report (including its HTML body).
+     */
+    getReport(id: number | string, options?: {
+        organizationId?: string | number;
+    }): Promise<ReportResult>;
+    /**
+     * Create a report owned by the authenticated user.
+     */
+    createReport(params: CreateReportParams): Promise<ReportResult>;
+    /**
+     * Partially update a report. Only the authenticated user's own reports can
+     * be updated (server-enforced); other reports return 403.
+     */
+    updateReport(id: number | string, params: UpdateReportParams): Promise<ReportResult>;
 }
 
 /**
@@ -779,4 +915,4 @@ declare class ParentIntegrator {
  * @packageDocumentation
  */
 
-export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UseCreditSystemReturn, type User, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
+export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreateReportParams, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type ListReportsParams, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type Report, type ReportResult, type ReportSummary, type ReportVisibility, ReportsClient, type ReportsClientConfig, type ReportsResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UpdateReportParams, type UseCreditSystemReturn, type User, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
