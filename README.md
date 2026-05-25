@@ -161,6 +161,7 @@ Base: **`authUrl`** (e.g. `https://app.supremegroup.ai/api/jwt`)
     "id": 123,
     "email": "user@example.com",
     "name": "Jane Doe",
+    "avatar_url": "https://app.supremegroup.ai/storage/avatars/123.png",
     "is_superadmin": false,
     "organizations": [
       {
@@ -778,3 +779,15 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 ## License
 
 MIT
+
+---
+
+## Changelog
+
+> Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-05-22
+
+- Added [SKILL.md](SKILL.md) — a Claude Code skill consumer-app devs can install for SDK setup, auth-conflict avoidance (Supabase, Lovable, NextAuth, etc.), and local dev posture.
+- Documented `avatar_url` on the user payload returned by `POST {authUrl}/login` in the [Auth](#auth) example.
+- Added [CLAUDE.md](CLAUDE.md) with agent instructions for keeping docs in sync with API/SDK changes, and started this changelog at the bottom of the README.
