@@ -8,11 +8,14 @@
 import { CreditSystemClient } from './core/CreditSystemClient';
 import { PersonasClient } from './core/PersonasClient';
 import { ReportsClient } from './core/ReportsClient';
+import { SkillsClient } from './core/SkillsClient';
 export { CreditSystemClient };
 export { PersonasClient };
 export { ReportsClient };
+export { SkillsClient };
 export type { PersonasClientConfig } from './core/PersonasClient';
 export type { ReportsClientConfig } from './core/ReportsClient';
+export type { SkillsClientConfig } from './core/SkillsClient';
 
 // React exports
 export { useCreditSystem } from './react/useCreditSystem';
@@ -87,6 +90,17 @@ export type {
   UpdateReportParams,
   ReportsResult,
   ReportResult,
+
+  // Skills
+  Skill,
+  SkillSummary,
+  SkillVisibility,
+  ListSkillsParams,
+  SkillsResult,
+  SkillResult,
+  UserSkillsResult,
+  UserSkillsRequestMessage,
+  UserSkillsResponseMessage,
 
   // React
   UseCreditSystemReturn

@@ -43,6 +43,7 @@ VITE_DEBUG=true
 | `VITE_SUPREME_AI_AUTH_URL` | `authUrl` | `/api/jwt` |
 | `VITE_SUPREME_AI_AGENTS_API_BASE_URL` | `agentsApiBaseUrl` | `/api/ai-agents/jwt` |
 | (derived) | `reportsApiBaseUrl` | `{api host}/api/reports/jwt` |
+| (derived) | `skillsApiBaseUrl` | `{api host}/api/skills/jwt` |
 | `VITE_ALLOWED_PARENTS` | `allowedOrigins` | `[window.location.origin]` |
 
 Reports base URL is derived automatically:
@@ -132,7 +133,8 @@ Token storage key prefix: `creditSystem_` (configurable via `storagePrefix`).
 | Personas | `getPersonas`, `getPersonaById` | under API root `/personas/jwt/...`, `/get-persona/...` |
 | Organizations | `switchOrganization`, `organizations`, `selectedOrganization` | Client-side + cookie; refreshes data in standalone |
 | Reports | `listReports`, `getReport`, `createReport`, `updateReport` | under `reportsApiBaseUrl` |
-| Embedded only | `requestCurrentUserState`, `requestUserOrganizations`, `requestUserPersonas` | postMessage to parent |
+| Skills | `getSkills`, `getSkillById` | under `skillsApiBaseUrl` |
+| Embedded only | `requestCurrentUserState`, `requestUserOrganizations`, `requestUserPersonas`, `requestUserSkills` | postMessage to parent |
 
 ---
 
@@ -680,6 +682,104 @@ Only the authenticated creator can update; others receive **403** from the serve
 
 ---
 
+### Skills
+
+Base: **`skillsApiBaseUrl`** (default `{host}/api/skills/jwt`)
+
+Skills are SKILL.md documents (Claude Code skills) the platform publishes so child apps can install or reference them. Read-only from the SDK. The server filters out `visibility: 'private'` before responding — there is no way for a caller to fetch a private skill through this surface.
+
+Visibility values: `private` | `internal` | `public`
+
+- `private` — never returned by this endpoint
+- `internal` — returned only when its `organization_id` matches the caller's selected org (server enforced)
+- `public` — returned to any authenticated caller
+
+Requires `features.skills !== false` (default **on**).
+
+`organization_id` defaults to the SDK's selected organization.
+
+---
+
+#### `getSkills(params?)`
+
+| | |
+|---|---|
+| **SDK** | `getSkills(params?: ListSkillsParams)` → `SkillsResult` |
+| **HTTP** | `GET {skillsApiBaseUrl}/list?organization_id=&category=&visibility=&cursor=&per_page=` |
+
+**Params (`ListSkillsParams`):**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `organizationId` | string \| number | Optional; defaults to selected org. Used to scope `internal` skills. |
+| `category` | string | Optional category slug filter |
+| `visibility` | `'internal' \| 'public'` | Optional band filter. Server still strips `private`. |
+| `cursor` | string | Pagination cursor |
+| `perPage` | number | Default 25, max 100 (server) |
+
+**Example response (SDK):**
+
+```json
+{
+  "success": true,
+  "skills": [
+    {
+      "id": 7,
+      "organization_id": null,
+      "name": "supreme-ai-sdk",
+      "description": "Install, configure, and integrate @supreme-ai/si-sdk",
+      "category": "integration",
+      "version": "1.0.0",
+      "visibility": "public",
+      "created_at": "2026-05-22T10:00:00Z",
+      "updated_at": "2026-05-22T10:00:00Z"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Empty list:
+
+```json
+{ "success": true, "skills": [], "nextCursor": null }
+```
+
+---
+
+#### `getSkillById(id)`
+
+| | |
+|---|---|
+| **SDK** | `getSkillById(id: number \| string)` → `SkillResult` |
+| **HTTP** | `GET {skillsApiBaseUrl}/{id}` |
+
+Returns the skill with its full SKILL.md `body` (frontmatter + markdown). Returns 404 for skills the caller is not entitled to read, including all `private` skills.
+
+**Example response (SDK):**
+
+```json
+{
+  "success": true,
+  "skill": {
+    "id": 7,
+    "organization_id": null,
+    "name": "supreme-ai-sdk",
+    "description": "Install, configure, and integrate @supreme-ai/si-sdk",
+    "category": "integration",
+    "version": "1.0.0",
+    "visibility": "public",
+    "created_at": "2026-05-22T10:00:00Z",
+    "updated_at": "2026-05-22T10:00:00Z",
+    "body": "---\nname: supreme-ai-sdk\ndescription: ...\n---\n\n# Supreme AI SDK integration skill\n..."
+  }
+}
+```
+
+More detail: [docs/SKILLS_API.md](./docs/SKILLS_API.md)
+
+---
+
 ### Embedded mode (iframe / parent)
 
 These methods use **postMessage** to the parent frame (no REST). Only available when `mode === 'embedded'`.
@@ -690,6 +790,7 @@ These methods use **postMessage** to the parent frame (no REST). Only available 
 | `requestCurrentUserState()` | `REQUEST_CURRENT_USER_STATE` | `RESPONSE_CURRENT_USER_STATE` |
 | `requestUserOrganizations()` | `REQUEST_USER_ORGS` | `RESPONSE_USER_ORGS` |
 | `requestUserPersonas()` | `REQUEST_USER_PERSONAS` | `RESPONSE_USER_PERSONAS` |
+| `requestUserSkills()` | `REQUEST_USER_SKILLS` | `RESPONSE_USER_SKILLS` |
 | (deep linking) | `ROUTE_CHANGED` | — |
 | (credits events) | `BALANCE_UPDATE`, `CREDITS_SPENT`, `CREDITS_ADDED` | — |
 | `logout()` | `LOGOUT` | — |
@@ -723,6 +824,7 @@ interface CreditSDKConfig {
   apiBaseUrl?: string;
   agentsApiBaseUrl?: string;
   reportsApiBaseUrl?: string;
+  skillsApiBaseUrl?: string;
   authUrl?: string;
   parentTimeout?: number;           // default 3000 ms
   tokenRefreshInterval?: number;    // default 600000 ms (10 min)
@@ -736,6 +838,7 @@ interface CreditSDKConfig {
     credits?: boolean;   // default true
     personas?: boolean;  // default true
     reports?: boolean;   // default true
+    skills?: boolean;    // default true
   };
   deepLinking?: boolean;            // embedded: notify parent on route change
   onAuthRequired?: () => void;
@@ -770,9 +873,9 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 | `CreditSystemProvider`, `useCreditContext` | React context |
 | `useSwitchOrganization` | Org switch helper hook |
 | `CreditSystemClient` | Imperative client |
-| `ReportsClient`, `PersonasClient` | Standalone REST clients |
+| `ReportsClient`, `PersonasClient`, `SkillsClient` | Standalone REST clients |
 | `ParentIntegrator` | Parent-page iframe helper |
-| Types | `User`, `Organization`, `Agent`, `Report`, `CreateReportParams`, … |
+| Types | `User`, `Organization`, `Agent`, `Report`, `CreateReportParams`, `Skill`, `SkillVisibility`, `ListSkillsParams`, … |
 
 ---
 
@@ -788,6 +891,7 @@ MIT
 
 ### 2026-05-22
 
+- Added Skills API integration: `getSkills`, `getSkillById`, embedded-mode `requestUserSkills`, new `SkillsClient` export, `features.skills` flag (default on), `skillsApiBaseUrl` config (derived by default). Server filters out `visibility: 'private'` before responding — the SDK never exposes private skills. Endpoint contract documented in [docs/SKILLS_API.md](docs/SKILLS_API.md).
 - Added [SKILL.md](SKILL.md) — a Claude Code skill consumer-app devs can install for SDK setup, auth-conflict avoidance (Supabase, Lovable, NextAuth, etc.), and local dev posture.
 - Documented `avatar_url` on the user payload returned by `POST {authUrl}/login` in the [Auth](#auth) example.
 - Added [CLAUDE.md](CLAUDE.md) with agent instructions for keeping docs in sync with API/SDK changes, and started this changelog at the bottom of the README.

@@ -85,6 +85,7 @@ export interface SDKFeatures {
   credits?: boolean;
   personas?: boolean;
   reports?: boolean;
+  skills?: boolean;
 }
 
 export interface CreditSDKConfig {
@@ -95,6 +96,11 @@ export interface CreditSDKConfig {
    * i.e. `/api/reports/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
    */
   reportsApiBaseUrl?: string;
+  /**
+   * Base URL for the Skills JWT API. Defaults to `${apiBaseUrl without /secure-credits/jwt}/skills/jwt`,
+   * i.e. `/api/skills/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
+   */
+  skillsApiBaseUrl?: string;
   authUrl?: string;
   parentTimeout?: number;
   tokenRefreshInterval?: number;
@@ -216,6 +222,18 @@ export interface UserPersonasResponseMessage extends IframeMessage {
   error?: string;
 }
 
+export interface UserSkillsRequestMessage extends IframeMessage {
+  type: 'REQUEST_USER_SKILLS';
+  origin: string;
+}
+
+export interface UserSkillsResponseMessage extends IframeMessage {
+  type: 'RESPONSE_USER_SKILLS';
+  skills?: SkillSummary[];
+  count?: number;
+  error?: string;
+}
+
 export interface RouteChangedMessage extends IframeMessage {
   type: 'ROUTE_CHANGED';
   /** The full path including pathname, search params, and hash (e.g. "/posts/123?tab=comments#top") */
@@ -326,6 +344,11 @@ export interface UserPersonasResult extends OperationResult {
   count?: number;
 }
 
+export interface UserSkillsResult extends OperationResult {
+  skills?: SkillSummary[];
+  count?: number;
+}
+
 // Switch Organization Result
 export interface SwitchOrgResult {
   success: boolean;
@@ -386,6 +409,10 @@ export interface UseCreditSystemReturn {
   getReport: (id: number | string, organizationId?: string | number) => Promise<ReportResult>;
   createReport: (params: CreateReportParams) => Promise<ReportResult>;
   updateReport: (id: number | string, params: UpdateReportParams) => Promise<ReportResult>;
+  // Skills — read-only; server filters out `private` visibility before returning.
+  getSkills: (params?: ListSkillsParams) => Promise<SkillsResult>;
+  getSkillById: (id: number | string) => Promise<SkillResult>;
+  requestUserSkills: () => Promise<UserSkillsResult>;
 }
 
 // Persona Types
@@ -524,4 +551,57 @@ export interface ReportResult extends OperationResult {
   report?: Report;
   /** Populated on 422 responses: `{ field: [messages, ...] }`. */
   validationErrors?: Record<string, string[]>;
+}
+
+// Skills Types
+//
+// Skills are SKILL.md documents (Claude Code skills) the platform exposes to
+// child apps so their devs / AI agents can install or reference them.
+// Visibility is enforced server-side: `private` skills are never returned by
+// the SDK endpoint. `internal` is restricted to the owning organization.
+// `public` is visible to any authenticated caller.
+export type SkillVisibility = 'private' | 'internal' | 'public';
+
+export interface SkillSummary {
+  id: number;
+  organization_id: number | null;
+  name: string;
+  description: string;
+  category?: string | null;
+  version?: string | null;
+  visibility: SkillVisibility;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Skill extends SkillSummary {
+  /**
+   * Full SKILL.md content — frontmatter + markdown body. Returned by
+   * `GET /skills/jwt/{id}`. Omitted from list responses unless the server
+   * is explicitly asked to include it.
+   */
+  body?: string;
+}
+
+export interface ListSkillsParams {
+  /** Defaults to the SDK's currently selected organization. Used to scope `internal` skills. */
+  organizationId?: string | number;
+  /** Restrict to a category slug (e.g. `auth`, `integration`). */
+  category?: string;
+  /** Restrict to a visibility band. Server still strips `private` regardless of this value. */
+  visibility?: Exclude<SkillVisibility, 'private'>;
+  /** Opaque pagination cursor returned by a previous call. */
+  cursor?: string;
+  /** Page size. Default 25, max 100 (server enforced). */
+  perPage?: number;
+}
+
+export interface SkillsResult extends OperationResult {
+  skills?: SkillSummary[];
+  /** Opaque cursor for the next page, or null when there are no more pages. */
+  nextCursor?: string | null;
+}
+
+export interface SkillResult extends OperationResult {
+  skill?: Skill;
 }

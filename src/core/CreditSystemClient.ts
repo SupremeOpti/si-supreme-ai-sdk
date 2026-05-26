@@ -9,6 +9,7 @@ import { ApiClient } from '../utils/ApiClient';
 import { StorageManager } from '../utils/StorageManager';
 import { PersonasClient } from './PersonasClient';
 import { ReportsClient } from './ReportsClient';
+import { SkillsClient } from './SkillsClient';
 import type {
   CreditSDKConfig,
   SDKState,
@@ -32,7 +33,12 @@ import type {
   CreateReportParams,
   UpdateReportParams,
   ReportsResult,
-  ReportResult
+  ReportResult,
+  ListSkillsParams,
+  SkillsResult,
+  SkillResult,
+  UserSkillsResult,
+  UserSkillsResponseMessage
 } from '../types';
 
 export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
@@ -45,6 +51,7 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   private agentsApiClient: ApiClient;
   private personasClient: PersonasClient;
   private reportsClient: ReportsClient;
+  private skillsClient: SkillsClient;
   private tokenTimer?: NodeJS.Timeout;
   private balanceTimer?: NodeJS.Timeout;
   private parentResponseReceived = false;
@@ -67,11 +74,15 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     const reportsApiBaseUrl =
       config.reportsApiBaseUrl ||
       `${apiBaseUrl.replace('/secure-credits/jwt', '')}/reports/jwt`;
+    const skillsApiBaseUrl =
+      config.skillsApiBaseUrl ||
+      `${apiBaseUrl.replace('/secure-credits/jwt', '')}/skills/jwt`;
 
     this.config = {
       apiBaseUrl,
       agentsApiBaseUrl: config.agentsApiBaseUrl || '/api/ai-agents/jwt',
       reportsApiBaseUrl,
+      skillsApiBaseUrl,
       authUrl: config.authUrl || '/api/jwt',
       parentTimeout: config.parentTimeout || 3000,
       tokenRefreshInterval: config.tokenRefreshInterval || 600000, // 10 minutes
@@ -84,7 +95,8 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
       features: {
         credits: config.features?.credits !== false, // Default true
         personas: config.features?.personas !== false, // Default true
-        reports: config.features?.reports !== false // Default true
+        reports: config.features?.reports !== false, // Default true
+        skills: config.features?.skills !== false // Default true
       },
       deepLinking: config.deepLinking || false,
       onAuthRequired: config.onAuthRequired || (() => {}),
@@ -126,6 +138,16 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     // the server enforces strict creator-only on reads and writes.
     this.reportsClient = new ReportsClient({
       apiBaseUrl: this.config.reportsApiBaseUrl,
+      getAuthToken: () => this.getAuthToken(),
+      getDefaultOrganizationId: () =>
+        this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
+      debug: this.config.debug
+    });
+
+    // Initialize SkillsClient. Read-only; server filters out `private`
+    // visibility before responding, so the SDK never exposes private skills.
+    this.skillsClient = new SkillsClient({
+      apiBaseUrl: this.config.skillsApiBaseUrl,
       getAuthToken: () => this.getAuthToken(),
       getDefaultOrganizationId: () =>
         this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
@@ -1377,6 +1399,61 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   }
 
   // ===================================================================
+  // SKILLS METHODS
+  //
+  // Read-only access to SKILL.md docs the platform publishes to child apps.
+  // The server filters out `visibility: 'private'` server-side; the SDK
+  // never exposes a way to fetch private skills.
+  // ===================================================================
+
+  /**
+   * List non-private skills visible to the authenticated caller.
+   * Defaults `organization_id` to the SDK's currently selected organization.
+   */
+  async getSkills(params: ListSkillsParams = {}): Promise<SkillsResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ getSkills blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated' };
+    }
+    if (!this.config.features.skills) {
+      this.log('⚠️ getSkills blocked: skills feature disabled');
+      return { success: false, error: 'Skills feature is disabled' };
+    }
+
+    this.log('🧩 Listing skills...', params);
+    const result = await this.skillsClient.listSkills(params);
+
+    if (!result.success) {
+      this.log(`❌ getSkills failed: ${result.error}`);
+      this.emit('error', { type: 'skills', error: result.error || 'Failed to list skills' });
+    }
+    return result;
+  }
+
+  /**
+   * Fetch a single skill including its SKILL.md body.
+   */
+  async getSkillById(id: number | string): Promise<SkillResult> {
+    if (!this.state.isAuthenticated) {
+      this.log('⚠️ getSkillById blocked: Not authenticated');
+      return { success: false, error: 'Not authenticated' };
+    }
+    if (!this.config.features.skills) {
+      this.log('⚠️ getSkillById blocked: skills feature disabled');
+      return { success: false, error: 'Skills feature is disabled' };
+    }
+
+    this.log(`🧩 Fetching skill ${id}`);
+    const result = await this.skillsClient.getSkillById(id);
+
+    if (!result.success) {
+      this.log(`❌ getSkillById(${id}) failed: ${result.error}`);
+      this.emit('error', { type: 'skills', error: result.error || 'Failed to fetch skill' });
+    }
+    return result;
+  }
+
+  // ===================================================================
   // USER STATE METHODS
   // ===================================================================
 
@@ -1705,6 +1782,66 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
           error: 'Timeout waiting for parent response'
         });
       }, 5000); // 5 second timeout
+    });
+  }
+
+  /**
+   * Request non-private skills from the parent frame (embedded mode only).
+   * The parent decides which non-private skills to serve based on the child's
+   * origin and the user's org membership.
+   */
+  async requestUserSkills(): Promise<UserSkillsResult> {
+    if (this.state.mode !== 'embedded') {
+      this.log('⚠️ requestUserSkills blocked: Only available in embedded mode');
+      return {
+        success: false,
+        error: 'requestUserSkills is only available in embedded mode'
+      };
+    }
+    if (!this.config.features.skills) {
+      this.log('⚠️ requestUserSkills blocked: skills feature disabled');
+      return { success: false, error: 'Skills feature is disabled' };
+    }
+
+    this.log('🧩 Requesting user skills from parent...');
+
+    return new Promise((resolve) => {
+      const responseHandler = (data: UserSkillsResponseMessage) => {
+        this.log('✅ User skills response received from parent');
+
+        if (data.skills) {
+          this.log(`📋 Skills count: ${data.skills.length}`);
+          resolve({
+            success: true,
+            skills: data.skills,
+            count: data.count ?? data.skills.length
+          });
+        } else if (data.error) {
+          this.log(`❌ User skills request error: ${data.error}`);
+          resolve({ success: false, error: data.error });
+        } else {
+          this.log('❌ Invalid user skills response from parent');
+          resolve({ success: false, error: 'Invalid response from parent' });
+        }
+
+        this.messageBridge.off('RESPONSE_USER_SKILLS', responseHandler);
+      };
+
+      this.messageBridge.on('RESPONSE_USER_SKILLS', responseHandler);
+
+      this.messageBridge.sendToParent('REQUEST_USER_SKILLS', {
+        origin: window.location.origin,
+        timestamp: Date.now()
+      });
+
+      setTimeout(() => {
+        this.log('⏰ User skills request timeout - no response from parent');
+        this.messageBridge.off('RESPONSE_USER_SKILLS', responseHandler);
+        resolve({
+          success: false,
+          error: 'Timeout waiting for parent response'
+        });
+      }, 5000);
     });
   }
 
