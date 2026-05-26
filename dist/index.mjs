@@ -886,6 +886,111 @@ var ReportsClient = class {
   }
 };
 
+// src/core/SkillsClient.ts
+var SkillsClient = class {
+  constructor(config) {
+    this.apiBaseUrl = config.apiBaseUrl.replace(/\/$/, "");
+    this.getAuthToken = config.getAuthToken;
+    this.getDefaultOrganizationId = config.getDefaultOrganizationId;
+    this.debug = config.debug || false;
+  }
+  log(...args) {
+    if (this.debug) {
+      console.log("[SkillsClient]", ...args);
+    }
+  }
+  buildHeaders() {
+    const token = this.getAuthToken();
+    if (!token) {
+      this.log("No authentication token available");
+      return null;
+    }
+    return {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    };
+  }
+  /**
+   * List non-private skills the caller can see.
+   *
+   * The server returns `internal` skills only when their `organization_id`
+   * matches the caller's selected org (or one of their orgs, server's call).
+   * `public` skills are returned to any authenticated caller.
+   */
+  async listSkills(params = {}) {
+    const headers = this.buildHeaders();
+    if (!headers) {
+      return { success: false, error: "Authentication required" };
+    }
+    const query = new URLSearchParams();
+    const orgId = params.organizationId ?? this.getDefaultOrganizationId?.();
+    if (orgId !== void 0 && orgId !== null && orgId !== "") {
+      query.append("organization_id", String(orgId));
+    }
+    if (params.category) query.append("category", params.category);
+    if (params.visibility) query.append("visibility", params.visibility);
+    if (params.cursor) query.append("cursor", params.cursor);
+    if (params.perPage) query.append("per_page", String(params.perPage));
+    const qs = query.toString();
+    const url = `${this.apiBaseUrl}/list${qs ? `?${qs}` : ""}`;
+    try {
+      this.log("GET", url);
+      const response = await fetch(url, { method: "GET", headers });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        this.log("HTTP error", response.status);
+        return {
+          success: false,
+          error: data?.message || `HTTP ${response.status}`
+        };
+      }
+      const payload = data?.data ?? data;
+      const skills = Array.isArray(payload?.skills) ? payload.skills : Array.isArray(payload) ? payload : [];
+      const nextCursor = payload?.next_cursor ?? payload?.nextCursor ?? null;
+      this.log(`Listed ${skills.length} skills (nextCursor: ${nextCursor ?? "null"})`);
+      return { success: true, skills, nextCursor };
+    } catch (err) {
+      this.log("Network error", err?.message);
+      return { success: false, error: err?.message || "Network error" };
+    }
+  }
+  /**
+   * Fetch a single skill including its SKILL.md body. The server returns 404
+   * for skills the caller is not entitled to read (including all private
+   * skills), so this method never leaks visibility information.
+   */
+  async getSkillById(id) {
+    const headers = this.buildHeaders();
+    if (!headers) {
+      return { success: false, error: "Authentication required" };
+    }
+    const url = `${this.apiBaseUrl}/${encodeURIComponent(String(id))}`;
+    try {
+      this.log("GET", url);
+      const response = await fetch(url, { method: "GET", headers });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        this.log("HTTP error", response.status);
+        return {
+          success: false,
+          error: data?.message || `HTTP ${response.status}`
+        };
+      }
+      const payload = data?.data ?? data;
+      const skill = payload?.skill ?? payload;
+      if (!skill || typeof skill !== "object" || !("id" in skill)) {
+        return { success: false, error: "Unexpected response format" };
+      }
+      this.log(`Fetched skill: ${skill.name}`);
+      return { success: true, skill };
+    } catch (err) {
+      this.log("Network error", err?.message);
+      return { success: false, error: err?.message || "Network error" };
+    }
+  }
+};
+
 // src/core/CreditSystemClient.ts
 var CreditSystemClient = class extends EventEmitter {
   constructor(config = {}) {
@@ -896,10 +1001,12 @@ var CreditSystemClient = class extends EventEmitter {
     this.debug = config.debug || false;
     const apiBaseUrl = config.apiBaseUrl || "/api/secure-credits/jwt";
     const reportsApiBaseUrl = config.reportsApiBaseUrl || `${apiBaseUrl.replace("/secure-credits/jwt", "")}/reports/jwt`;
+    const skillsApiBaseUrl = config.skillsApiBaseUrl || `${apiBaseUrl.replace("/secure-credits/jwt", "")}/skills/jwt`;
     this.config = {
       apiBaseUrl,
       agentsApiBaseUrl: config.agentsApiBaseUrl || "/api/ai-agents/jwt",
       reportsApiBaseUrl,
+      skillsApiBaseUrl,
       authUrl: config.authUrl || "/api/jwt",
       parentTimeout: config.parentTimeout || 3e3,
       tokenRefreshInterval: config.tokenRefreshInterval || 6e5,
@@ -916,7 +1023,9 @@ var CreditSystemClient = class extends EventEmitter {
         // Default true
         personas: config.features?.personas !== false,
         // Default true
-        reports: config.features?.reports !== false
+        reports: config.features?.reports !== false,
+        // Default true
+        skills: config.features?.skills !== false
         // Default true
       },
       deepLinking: config.deepLinking || false,
@@ -952,6 +1061,12 @@ var CreditSystemClient = class extends EventEmitter {
     });
     this.reportsClient = new ReportsClient({
       apiBaseUrl: this.config.reportsApiBaseUrl,
+      getAuthToken: () => this.getAuthToken(),
+      getDefaultOrganizationId: () => this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
+      debug: this.config.debug
+    });
+    this.skillsClient = new SkillsClient({
+      apiBaseUrl: this.config.skillsApiBaseUrl,
       getAuthToken: () => this.getAuthToken(),
       getDefaultOrganizationId: () => this.state.selectedOrganization?.id ?? this.getOrganizationIdFromCookie(),
       debug: this.config.debug
@@ -1941,6 +2056,54 @@ var CreditSystemClient = class extends EventEmitter {
     return result;
   }
   // ===================================================================
+  // SKILLS METHODS
+  //
+  // Read-only access to SKILL.md docs the platform publishes to child apps.
+  // The server filters out `visibility: 'private'` server-side; the SDK
+  // never exposes a way to fetch private skills.
+  // ===================================================================
+  /**
+   * List non-private skills visible to the authenticated caller.
+   * Defaults `organization_id` to the SDK's currently selected organization.
+   */
+  async getSkills(params = {}) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F getSkills blocked: Not authenticated");
+      return { success: false, error: "Not authenticated" };
+    }
+    if (!this.config.features.skills) {
+      this.log("\u26A0\uFE0F getSkills blocked: skills feature disabled");
+      return { success: false, error: "Skills feature is disabled" };
+    }
+    this.log("\u{1F9E9} Listing skills...", params);
+    const result = await this.skillsClient.listSkills(params);
+    if (!result.success) {
+      this.log(`\u274C getSkills failed: ${result.error}`);
+      this.emit("error", { type: "skills", error: result.error || "Failed to list skills" });
+    }
+    return result;
+  }
+  /**
+   * Fetch a single skill including its SKILL.md body.
+   */
+  async getSkillById(id) {
+    if (!this.state.isAuthenticated) {
+      this.log("\u26A0\uFE0F getSkillById blocked: Not authenticated");
+      return { success: false, error: "Not authenticated" };
+    }
+    if (!this.config.features.skills) {
+      this.log("\u26A0\uFE0F getSkillById blocked: skills feature disabled");
+      return { success: false, error: "Skills feature is disabled" };
+    }
+    this.log(`\u{1F9E9} Fetching skill ${id}`);
+    const result = await this.skillsClient.getSkillById(id);
+    if (!result.success) {
+      this.log(`\u274C getSkillById(${id}) failed: ${result.error}`);
+      this.emit("error", { type: "skills", error: result.error || "Failed to fetch skill" });
+    }
+    return result;
+  }
+  // ===================================================================
   // USER STATE METHODS
   // ===================================================================
   /**
@@ -2192,6 +2355,58 @@ var CreditSystemClient = class extends EventEmitter {
       setTimeout(() => {
         this.log("\u23F0 User personas request timeout - no response from parent");
         this.messageBridge.off("RESPONSE_USER_PERSONAS", responseHandler);
+        resolve({
+          success: false,
+          error: "Timeout waiting for parent response"
+        });
+      }, 5e3);
+    });
+  }
+  /**
+   * Request non-private skills from the parent frame (embedded mode only).
+   * The parent decides which non-private skills to serve based on the child's
+   * origin and the user's org membership.
+   */
+  async requestUserSkills() {
+    if (this.state.mode !== "embedded") {
+      this.log("\u26A0\uFE0F requestUserSkills blocked: Only available in embedded mode");
+      return {
+        success: false,
+        error: "requestUserSkills is only available in embedded mode"
+      };
+    }
+    if (!this.config.features.skills) {
+      this.log("\u26A0\uFE0F requestUserSkills blocked: skills feature disabled");
+      return { success: false, error: "Skills feature is disabled" };
+    }
+    this.log("\u{1F9E9} Requesting user skills from parent...");
+    return new Promise((resolve) => {
+      const responseHandler = (data) => {
+        this.log("\u2705 User skills response received from parent");
+        if (data.skills) {
+          this.log(`\u{1F4CB} Skills count: ${data.skills.length}`);
+          resolve({
+            success: true,
+            skills: data.skills,
+            count: data.count ?? data.skills.length
+          });
+        } else if (data.error) {
+          this.log(`\u274C User skills request error: ${data.error}`);
+          resolve({ success: false, error: data.error });
+        } else {
+          this.log("\u274C Invalid user skills response from parent");
+          resolve({ success: false, error: "Invalid response from parent" });
+        }
+        this.messageBridge.off("RESPONSE_USER_SKILLS", responseHandler);
+      };
+      this.messageBridge.on("RESPONSE_USER_SKILLS", responseHandler);
+      this.messageBridge.sendToParent("REQUEST_USER_SKILLS", {
+        origin: window.location.origin,
+        timestamp: Date.now()
+      });
+      setTimeout(() => {
+        this.log("\u23F0 User skills request timeout - no response from parent");
+        this.messageBridge.off("RESPONSE_USER_SKILLS", responseHandler);
         resolve({
           success: false,
           error: "Timeout waiting for parent response"
@@ -2713,6 +2928,24 @@ function useCreditSystem(config) {
     }
     return await clientRef.current.updateReport(id, params);
   }, []);
+  const getSkills = useCallback(async (params) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.getSkills(params);
+  }, []);
+  const getSkillById = useCallback(async (id) => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.getSkillById(id);
+  }, []);
+  const requestUserSkills = useCallback(async () => {
+    if (!clientRef.current) {
+      return { success: false, error: "Client not initialized" };
+    }
+    return await clientRef.current.requestUserSkills();
+  }, []);
   return {
     isInitialized,
     isAuthenticated,
@@ -2743,7 +2976,10 @@ function useCreditSystem(config) {
     listReports,
     getReport,
     createReport,
-    updateReport
+    updateReport,
+    getSkills,
+    getSkillById,
+    requestUserSkills
   };
 }
 
@@ -3086,6 +3322,7 @@ export {
   ParentIntegrator,
   PersonasClient,
   ReportsClient,
+  SkillsClient,
   index_default as default,
   useCreditContext,
   useCreditSystem,

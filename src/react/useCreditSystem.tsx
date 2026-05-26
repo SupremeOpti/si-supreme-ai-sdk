@@ -26,7 +26,11 @@ import type {
   CreateReportParams,
   UpdateReportParams,
   ReportsResult,
-  ReportResult
+  ReportResult,
+  ListSkillsParams,
+  SkillsResult,
+  SkillResult,
+  UserSkillsResult
 } from '../types';
 
 export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn {
@@ -355,6 +359,29 @@ export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn
     return await clientRef.current.updateReport(id, params);
   }, []);
 
+  // --- Skills (read-only; server filters `private` visibility) ---
+
+  const getSkills = useCallback(async (params?: ListSkillsParams): Promise<SkillsResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.getSkills(params);
+  }, []);
+
+  const getSkillById = useCallback(async (id: number | string): Promise<SkillResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.getSkillById(id);
+  }, []);
+
+  const requestUserSkills = useCallback(async (): Promise<UserSkillsResult> => {
+    if (!clientRef.current) {
+      return { success: false, error: 'Client not initialized' };
+    }
+    return await clientRef.current.requestUserSkills();
+  }, []);
+
   return {
     isInitialized,
     isAuthenticated,
@@ -385,6 +412,9 @@ export function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn
     listReports,
     getReport,
     createReport,
-    updateReport
+    updateReport,
+    getSkills,
+    getSkillById,
+    requestUserSkills
   };
 }

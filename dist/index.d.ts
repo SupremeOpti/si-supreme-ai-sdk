@@ -76,6 +76,7 @@ interface SDKFeatures {
     credits?: boolean;
     personas?: boolean;
     reports?: boolean;
+    skills?: boolean;
 }
 interface CreditSDKConfig {
     apiBaseUrl?: string;
@@ -85,6 +86,11 @@ interface CreditSDKConfig {
      * i.e. `/api/reports/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
      */
     reportsApiBaseUrl?: string;
+    /**
+     * Base URL for the Skills JWT API. Defaults to `${apiBaseUrl without /secure-credits/jwt}/skills/jwt`,
+     * i.e. `/api/skills/jwt` when `apiBaseUrl` is `/api/secure-credits/jwt`.
+     */
+    skillsApiBaseUrl?: string;
     authUrl?: string;
     parentTimeout?: number;
     tokenRefreshInterval?: number;
@@ -165,6 +171,16 @@ interface UserStateResponseMessage extends IframeMessage {
         profileImage?: string | null;
         personas?: any[];
     };
+    error?: string;
+}
+interface UserSkillsRequestMessage extends IframeMessage {
+    type: 'REQUEST_USER_SKILLS';
+    origin: string;
+}
+interface UserSkillsResponseMessage extends IframeMessage {
+    type: 'RESPONSE_USER_SKILLS';
+    skills?: SkillSummary[];
+    count?: number;
     error?: string;
 }
 interface RouteChangedMessage extends IframeMessage {
@@ -292,6 +308,10 @@ interface UserPersonasResult extends OperationResult {
     }>;
     count?: number;
 }
+interface UserSkillsResult extends OperationResult {
+    skills?: SkillSummary[];
+    count?: number;
+}
 interface SwitchOrgResult {
     success: boolean;
     error?: string;
@@ -350,6 +370,9 @@ interface UseCreditSystemReturn {
     getReport: (id: number | string, organizationId?: string | number) => Promise<ReportResult>;
     createReport: (params: CreateReportParams) => Promise<ReportResult>;
     updateReport: (id: number | string, params: UpdateReportParams) => Promise<ReportResult>;
+    getSkills: (params?: ListSkillsParams) => Promise<SkillsResult>;
+    getSkillById: (id: number | string) => Promise<SkillResult>;
+    requestUserSkills: () => Promise<UserSkillsResult>;
 }
 interface Persona {
     id: number;
@@ -464,6 +487,46 @@ interface ReportResult extends OperationResult {
     /** Populated on 422 responses: `{ field: [messages, ...] }`. */
     validationErrors?: Record<string, string[]>;
 }
+type SkillVisibility = 'private' | 'internal' | 'public';
+interface SkillSummary {
+    id: number;
+    organization_id: number | null;
+    name: string;
+    description: string;
+    category?: string | null;
+    version?: string | null;
+    visibility: SkillVisibility;
+    created_at: string;
+    updated_at: string;
+}
+interface Skill extends SkillSummary {
+    /**
+     * Full SKILL.md content — frontmatter + markdown body. Returned by
+     * `GET /skills/jwt/{id}`. Omitted from list responses unless the server
+     * is explicitly asked to include it.
+     */
+    body?: string;
+}
+interface ListSkillsParams {
+    /** Defaults to the SDK's currently selected organization. Used to scope `internal` skills. */
+    organizationId?: string | number;
+    /** Restrict to a category slug (e.g. `auth`, `integration`). */
+    category?: string;
+    /** Restrict to a visibility band. Server still strips `private` regardless of this value. */
+    visibility?: Exclude<SkillVisibility, 'private'>;
+    /** Opaque pagination cursor returned by a previous call. */
+    cursor?: string;
+    /** Page size. Default 25, max 100 (server enforced). */
+    perPage?: number;
+}
+interface SkillsResult extends OperationResult {
+    skills?: SkillSummary[];
+    /** Opaque cursor for the next page, or null when there are no more pages. */
+    nextCursor?: string | null;
+}
+interface SkillResult extends OperationResult {
+    skill?: Skill;
+}
 
 /**
  * Type-safe EventEmitter implementation
@@ -508,6 +571,7 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     private agentsApiClient;
     private personasClient;
     private reportsClient;
+    private skillsClient;
     private tokenTimer?;
     private balanceTimer?;
     private parentResponseReceived;
@@ -635,6 +699,15 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
      */
     updateReport(id: number | string, params: UpdateReportParams): Promise<ReportResult>;
     /**
+     * List non-private skills visible to the authenticated caller.
+     * Defaults `organization_id` to the SDK's currently selected organization.
+     */
+    getSkills(params?: ListSkillsParams): Promise<SkillsResult>;
+    /**
+     * Fetch a single skill including its SKILL.md body.
+     */
+    getSkillById(id: number | string): Promise<SkillResult>;
+    /**
      * Request current user state from parent page (embedded mode only)
      */
     requestCurrentUserState(): Promise<UserStateResult>;
@@ -646,6 +719,12 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
      * Request user personas from parent page (embedded mode only)
      */
     requestUserPersonas(): Promise<UserPersonasResult>;
+    /**
+     * Request non-private skills from the parent frame (embedded mode only).
+     * The parent decides which non-private skills to serve based on the child's
+     * origin and the user's org membership.
+     */
+    requestUserSkills(): Promise<UserSkillsResult>;
     /**
      * Refresh JWT token
      */
@@ -767,6 +846,44 @@ declare class ReportsClient {
      * be updated (server-enforced); other reports return 403.
      */
     updateReport(id: number | string, params: UpdateReportParams): Promise<ReportResult>;
+}
+
+/**
+ * SkillsClient - Read-only access to platform-published SKILL.md docs.
+ *
+ * The server filters out `visibility: 'private'` before responding. The SDK
+ * surface intentionally has no creator/owner parameter — what the caller
+ * receives is what they are allowed to see.
+ */
+
+interface SkillsClientConfig {
+    apiBaseUrl: string;
+    getAuthToken: () => string | null;
+    getDefaultOrganizationId?: () => string | number | null | undefined;
+    debug?: boolean;
+}
+declare class SkillsClient {
+    private apiBaseUrl;
+    private getAuthToken;
+    private getDefaultOrganizationId?;
+    private debug;
+    constructor(config: SkillsClientConfig);
+    private log;
+    private buildHeaders;
+    /**
+     * List non-private skills the caller can see.
+     *
+     * The server returns `internal` skills only when their `organization_id`
+     * matches the caller's selected org (or one of their orgs, server's call).
+     * `public` skills are returned to any authenticated caller.
+     */
+    listSkills(params?: ListSkillsParams): Promise<SkillsResult>;
+    /**
+     * Fetch a single skill including its SKILL.md body. The server returns 404
+     * for skills the caller is not entitled to read (including all private
+     * skills), so this method never leaks visibility information.
+     */
+    getSkillById(id: number | string): Promise<SkillResult>;
 }
 
 /**
@@ -915,4 +1032,4 @@ declare class ParentIntegrator {
  * @packageDocumentation
  */
 
-export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreateReportParams, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type ListReportsParams, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type Report, type ReportResult, type ReportSummary, type ReportVisibility, ReportsClient, type ReportsClientConfig, type ReportsResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UpdateReportParams, type UseCreditSystemReturn, type User, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
+export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreateReportParams, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type ListReportsParams, type ListSkillsParams, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type Report, type ReportResult, type ReportSummary, type ReportVisibility, ReportsClient, type ReportsClientConfig, type ReportsResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type Skill, type SkillResult, type SkillSummary, type SkillVisibility, SkillsClient, type SkillsClientConfig, type SkillsResult, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UpdateReportParams, type UseCreditSystemReturn, type User, type UserSkillsRequestMessage, type UserSkillsResponseMessage, type UserSkillsResult, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
