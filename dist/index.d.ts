@@ -487,33 +487,32 @@ interface ReportResult extends OperationResult {
     /** Populated on 422 responses: `{ field: [messages, ...] }`. */
     validationErrors?: Record<string, string[]>;
 }
-type SkillVisibility = 'private' | 'internal' | 'public';
+interface SkillCreator {
+    id: number;
+    name: string;
+    email?: string | null;
+}
 interface SkillSummary {
     id: number;
-    organization_id: number | null;
-    name: string;
+    title: string;
     description: string;
-    category?: string | null;
-    version?: string | null;
-    visibility: SkillVisibility;
+    template: string | null;
+    creator: SkillCreator;
+    is_owner: boolean;
     created_at: string;
     updated_at: string;
 }
 interface Skill extends SkillSummary {
     /**
-     * Full SKILL.md content — frontmatter + markdown body. Returned by
-     * `GET /skills/jwt/{id}`. Omitted from list responses unless the server
-     * is explicitly asked to include it.
+     * Packaged SKILL.md (frontmatter + markdown body). Returned by
+     * `GET /skills/jwt/{id}` only. `null` when no body has been authored
+     * for the skill yet.
      */
-    body?: string;
+    content: string | null;
 }
 interface ListSkillsParams {
-    /** Defaults to the SDK's currently selected organization. Used to scope `internal` skills. */
+    /** Defaults to the SDK's currently selected organization. */
     organizationId?: string | number;
-    /** Restrict to a category slug (e.g. `auth`, `integration`). */
-    category?: string;
-    /** Restrict to a visibility band. Server still strips `private` regardless of this value. */
-    visibility?: Exclude<SkillVisibility, 'private'>;
     /** Opaque pagination cursor returned by a previous call. */
     cursor?: string;
     /** Page size. Default 25, max 100 (server enforced). */
@@ -851,9 +850,13 @@ declare class ReportsClient {
 /**
  * SkillsClient - Read-only access to platform-published SKILL.md docs.
  *
- * The server filters out `visibility: 'private'` before responding. The SDK
- * surface intentionally has no creator/owner parameter — what the caller
- * receives is what they are allowed to see.
+ * The server filters out private skills before responding. The SDK surface
+ * intentionally has no creator/owner parameter — what the caller receives is
+ * what they are allowed to see.
+ *
+ * `getSkills` returns lightweight summaries without `content`; the backend
+ * only packages SKILL.md bodies when `getSkillById` is called for a specific
+ * skill.
  */
 
 interface SkillsClientConfig {
@@ -871,17 +874,15 @@ declare class SkillsClient {
     private log;
     private buildHeaders;
     /**
-     * List non-private skills the caller can see.
-     *
-     * The server returns `internal` skills only when their `organization_id`
-     * matches the caller's selected org (or one of their orgs, server's call).
-     * `public` skills are returned to any authenticated caller.
+     * List non-private skills the caller can see. Returns summaries only — no
+     * SKILL.md `content`. Call `getSkillById` to fetch the packaged body for a
+     * specific skill.
      */
     listSkills(params?: ListSkillsParams): Promise<SkillsResult>;
     /**
-     * Fetch a single skill including its SKILL.md body. The server returns 404
-     * for skills the caller is not entitled to read (including all private
-     * skills), so this method never leaks visibility information.
+     * Fetch a single skill including its packaged SKILL.md `content`. The
+     * server returns 404 for skills the caller is not entitled to read
+     * (including all private skills), so this method never leaks existence.
      */
     getSkillById(id: number | string): Promise<SkillResult>;
 }
@@ -1032,4 +1033,4 @@ declare class ParentIntegrator {
  * @packageDocumentation
  */
 
-export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreateReportParams, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type ListReportsParams, type ListSkillsParams, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type Report, type ReportResult, type ReportSummary, type ReportVisibility, ReportsClient, type ReportsClientConfig, type ReportsResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type Skill, type SkillResult, type SkillSummary, type SkillVisibility, SkillsClient, type SkillsClientConfig, type SkillsResult, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UpdateReportParams, type UseCreditSystemReturn, type User, type UserSkillsRequestMessage, type UserSkillsResponseMessage, type UserSkillsResult, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
+export { type AddCreditsResponse, type AddResult, type Agent, type AgentsResult, type ApiResponse, type AuthResult, type AuthTokens, type BalanceResponse, type BalanceResult, type CreateReportParams, type CreditBalance, type CreditSDKConfig, type CreditSDKEvents, CreditSystemClient, CreditSystemProvider, type HistoryResult, type IframeMessage, type ListReportsParams, type ListSkillsParams, type OperationResult, type Organization, type ParentConfig, ParentIntegrator, type Persona, type PersonaResult, PersonasClient, type PersonasClientConfig, type PersonasResult, type Report, type ReportResult, type ReportSummary, type ReportVisibility, ReportsClient, type ReportsClientConfig, type ReportsResult, type RoleGroupedAgents, type RouteChangedMessage, type SDKState, type Skill, type SkillCreator, type SkillResult, type SkillSummary, SkillsClient, type SkillsClientConfig, type SkillsResult, type SpendResponse, type SpendResult, type SwitchOrgResult, type TokenRequestMessage, type TokenResponseMessage, type Transaction, type TransactionHistory, type UpdateReportParams, type UseCreditSystemReturn, type User, type UserSkillsRequestMessage, type UserSkillsResponseMessage, type UserSkillsResult, type UserStateRequestMessage, type UserStateResponseMessage, type UserStateResult, CreditSystemClient as default, useCreditContext, useCreditSystem, useSwitchOrganization };
