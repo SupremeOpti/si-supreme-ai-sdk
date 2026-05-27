@@ -947,11 +947,9 @@ var SkillsClient = class {
     };
   }
   /**
-   * List non-private skills the caller can see.
-   *
-   * The server returns `internal` skills only when their `organization_id`
-   * matches the caller's selected org (or one of their orgs, server's call).
-   * `public` skills are returned to any authenticated caller.
+   * List non-private skills the caller can see. Returns summaries only — no
+   * SKILL.md `content`. Call `getSkillById` to fetch the packaged body for a
+   * specific skill.
    */
   async listSkills(params = {}) {
     const headers = this.buildHeaders();
@@ -963,8 +961,6 @@ var SkillsClient = class {
     if (orgId !== void 0 && orgId !== null && orgId !== "") {
       query.append("organization_id", String(orgId));
     }
-    if (params.category) query.append("category", params.category);
-    if (params.visibility) query.append("visibility", params.visibility);
     if (params.cursor) query.append("cursor", params.cursor);
     if (params.perPage) query.append("per_page", String(params.perPage));
     const qs = query.toString();
@@ -991,9 +987,9 @@ var SkillsClient = class {
     }
   }
   /**
-   * Fetch a single skill including its SKILL.md body. The server returns 404
-   * for skills the caller is not entitled to read (including all private
-   * skills), so this method never leaks visibility information.
+   * Fetch a single skill including its packaged SKILL.md `content`. The
+   * server returns 404 for skills the caller is not entitled to read
+   * (including all private skills), so this method never leaks existence.
    */
   async getSkillById(id) {
     const headers = this.buildHeaders();
@@ -1017,7 +1013,7 @@ var SkillsClient = class {
       if (!skill || typeof skill !== "object" || !("id" in skill)) {
         return { success: false, error: "Unexpected response format" };
       }
-      this.log(`Fetched skill: ${skill.name}`);
+      this.log(`Fetched skill: ${skill.title}`);
       return { success: true, skill };
     } catch (err) {
       this.log("Network error", err?.message);

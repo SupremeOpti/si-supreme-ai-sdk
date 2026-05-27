@@ -94,7 +94,7 @@ export type {
   // Skills
   Skill,
   SkillSummary,
-  SkillVisibility,
+  SkillCreator,
   ListSkillsParams,
   SkillsResult,
   SkillResult,

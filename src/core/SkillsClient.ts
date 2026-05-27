@@ -1,9 +1,13 @@
 /**
  * SkillsClient - Read-only access to platform-published SKILL.md docs.
  *
- * The server filters out `visibility: 'private'` before responding. The SDK
- * surface intentionally has no creator/owner parameter — what the caller
- * receives is what they are allowed to see.
+ * The server filters out private skills before responding. The SDK surface
+ * intentionally has no creator/owner parameter — what the caller receives is
+ * what they are allowed to see.
+ *
+ * `getSkills` returns lightweight summaries without `content`; the backend
+ * only packages SKILL.md bodies when `getSkillById` is called for a specific
+ * skill.
  */
 
 import type {
@@ -54,11 +58,9 @@ export class SkillsClient {
   }
 
   /**
-   * List non-private skills the caller can see.
-   *
-   * The server returns `internal` skills only when their `organization_id`
-   * matches the caller's selected org (or one of their orgs, server's call).
-   * `public` skills are returned to any authenticated caller.
+   * List non-private skills the caller can see. Returns summaries only — no
+   * SKILL.md `content`. Call `getSkillById` to fetch the packaged body for a
+   * specific skill.
    */
   async listSkills(params: ListSkillsParams = {}): Promise<SkillsResult> {
     const headers = this.buildHeaders();
@@ -72,8 +74,6 @@ export class SkillsClient {
     if (orgId !== undefined && orgId !== null && orgId !== '') {
       query.append('organization_id', String(orgId));
     }
-    if (params.category) query.append('category', params.category);
-    if (params.visibility) query.append('visibility', params.visibility);
     if (params.cursor) query.append('cursor', params.cursor);
     if (params.perPage) query.append('per_page', String(params.perPage));
 
@@ -113,9 +113,9 @@ export class SkillsClient {
   }
 
   /**
-   * Fetch a single skill including its SKILL.md body. The server returns 404
-   * for skills the caller is not entitled to read (including all private
-   * skills), so this method never leaks visibility information.
+   * Fetch a single skill including its packaged SKILL.md `content`. The
+   * server returns 404 for skills the caller is not entitled to read
+   * (including all private skills), so this method never leaks existence.
    */
   async getSkillById(id: number | string): Promise<SkillResult> {
     const headers = this.buildHeaders();
@@ -144,7 +144,7 @@ export class SkillsClient {
         return { success: false, error: 'Unexpected response format' };
       }
 
-      this.log(`Fetched skill: ${skill.name}`);
+      this.log(`Fetched skill: ${skill.title}`);
       return { success: true, skill };
     } catch (err: any) {
       this.log('Network error', err?.message);

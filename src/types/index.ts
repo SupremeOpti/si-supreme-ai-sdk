@@ -555,41 +555,45 @@ export interface ReportResult extends OperationResult {
 
 // Skills Types
 //
-// Skills are SKILL.md documents (Claude Code skills) the platform exposes to
-// child apps so their devs / AI agents can install or reference them.
-// Visibility is enforced server-side: `private` skills are never returned by
-// the SDK endpoint. `internal` is restricted to the owning organization.
-// `public` is visible to any authenticated caller.
-export type SkillVisibility = 'private' | 'internal' | 'public';
+// Skills are SKILL.md documents the platform publishes to child apps so their
+// devs / AI agents can install or reference them. The backend filters out
+// private skills server-side before responding.
+//
+// Two shapes:
+// - `SkillSummary` is returned by `GET /skills/jwt/list`. No SKILL.md content
+//   — keeps the list payload small and lets the backend skip on-demand
+//   packaging for skills nobody opens.
+// - `Skill` is returned by `GET /skills/jwt/{id}` and extends `SkillSummary`
+//   with the packaged SKILL.md `content`.
+export interface SkillCreator {
+  id: number;
+  name: string;
+  email?: string | null;
+}
 
 export interface SkillSummary {
   id: number;
-  organization_id: number | null;
-  name: string;
+  title: string;
   description: string;
-  category?: string | null;
-  version?: string | null;
-  visibility: SkillVisibility;
+  template: string | null;
+  creator: SkillCreator;
+  is_owner: boolean;
   created_at: string;
   updated_at: string;
 }
 
 export interface Skill extends SkillSummary {
   /**
-   * Full SKILL.md content — frontmatter + markdown body. Returned by
-   * `GET /skills/jwt/{id}`. Omitted from list responses unless the server
-   * is explicitly asked to include it.
+   * Packaged SKILL.md (frontmatter + markdown body). Returned by
+   * `GET /skills/jwt/{id}` only. `null` when no body has been authored
+   * for the skill yet.
    */
-  body?: string;
+  content: string | null;
 }
 
 export interface ListSkillsParams {
-  /** Defaults to the SDK's currently selected organization. Used to scope `internal` skills. */
+  /** Defaults to the SDK's currently selected organization. */
   organizationId?: string | number;
-  /** Restrict to a category slug (e.g. `auth`, `integration`). */
-  category?: string;
-  /** Restrict to a visibility band. Server still strips `private` regardless of this value. */
-  visibility?: Exclude<SkillVisibility, 'private'>;
   /** Opaque pagination cursor returned by a previous call. */
   cursor?: string;
   /** Page size. Default 25, max 100 (server enforced). */

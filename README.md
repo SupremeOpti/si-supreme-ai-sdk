@@ -686,17 +686,13 @@ Only the authenticated creator can update; others receive **403** from the serve
 
 Base: **`skillsApiBaseUrl`** (default `{host}/api/skills/jwt`)
 
-Skills are SKILL.md documents (Claude Code skills) the platform publishes so child apps can install or reference them. Read-only from the SDK. The server filters out `visibility: 'private'` before responding — there is no way for a caller to fetch a private skill through this surface.
-
-Visibility values: `private` | `internal` | `public`
-
-- `private` — never returned by this endpoint
-- `internal` — returned only when its `organization_id` matches the caller's selected org (server enforced)
-- `public` — returned to any authenticated caller
+Skills are SKILL.md documents the platform publishes so child apps can install or reference them. Read-only from the SDK. The server filters out private skills before responding — there is no way for a caller to fetch a private skill through this surface.
 
 Requires `features.skills !== false` (default **on**).
 
 `organization_id` defaults to the SDK's selected organization.
+
+**Two-step shape.** `getSkills` returns lightweight summaries (no SKILL.md `content`); `getSkillById` triggers on-demand packaging on the backend and returns the full markdown. Mirrors how reports work — keeps list responses small and avoids packaging skills nobody opens.
 
 ---
 
@@ -705,15 +701,13 @@ Requires `features.skills !== false` (default **on**).
 | | |
 |---|---|
 | **SDK** | `getSkills(params?: ListSkillsParams)` → `SkillsResult` |
-| **HTTP** | `GET {skillsApiBaseUrl}/list?organization_id=&category=&visibility=&cursor=&per_page=` |
+| **HTTP** | `GET {skillsApiBaseUrl}/list?organization_id=&cursor=&per_page=` |
 
 **Params (`ListSkillsParams`):**
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `organizationId` | string \| number | Optional; defaults to selected org. Used to scope `internal` skills. |
-| `category` | string | Optional category slug filter |
-| `visibility` | `'internal' \| 'public'` | Optional band filter. Server still strips `private`. |
+| `organizationId` | string \| number | Optional; defaults to selected org |
 | `cursor` | string | Pagination cursor |
 | `perPage` | number | Default 25, max 100 (server) |
 
@@ -724,20 +718,21 @@ Requires `features.skills !== false` (default **on**).
   "success": true,
   "skills": [
     {
-      "id": 7,
-      "organization_id": null,
-      "name": "supreme-ai-sdk",
-      "description": "Install, configure, and integrate @supreme-ai/si-sdk",
-      "category": "integration",
-      "version": "1.0.0",
-      "visibility": "public",
-      "created_at": "2026-05-22T10:00:00Z",
-      "updated_at": "2026-05-22T10:00:00Z"
+      "id": 5,
+      "title": "Prestige Presenter",
+      "description": "Build polished client presentations from raw notes",
+      "template": null,
+      "creator": { "id": 525, "name": "Aileen O'Connell", "email": null },
+      "is_owner": false,
+      "created_at": "2026-05-18T20:55:43.000000Z",
+      "updated_at": "2026-05-18T20:55:43.000000Z"
     }
   ],
   "nextCursor": null
 }
 ```
+
+No `content` field on list entries — use `getSkillById` to fetch the SKILL.md body.
 
 Empty list:
 
@@ -754,7 +749,7 @@ Empty list:
 | **SDK** | `getSkillById(id: number \| string)` → `SkillResult` |
 | **HTTP** | `GET {skillsApiBaseUrl}/{id}` |
 
-Returns the skill with its full SKILL.md `body` (frontmatter + markdown). Returns 404 for skills the caller is not entitled to read, including all `private` skills.
+Returns the skill with its packaged SKILL.md `content` (frontmatter + markdown). The backend packages content on demand for this call only. Returns 404 for skills the caller is not entitled to read.
 
 **Example response (SDK):**
 
@@ -762,19 +757,20 @@ Returns the skill with its full SKILL.md `body` (frontmatter + markdown). Return
 {
   "success": true,
   "skill": {
-    "id": 7,
-    "organization_id": null,
-    "name": "supreme-ai-sdk",
-    "description": "Install, configure, and integrate @supreme-ai/si-sdk",
-    "category": "integration",
-    "version": "1.0.0",
-    "visibility": "public",
-    "created_at": "2026-05-22T10:00:00Z",
-    "updated_at": "2026-05-22T10:00:00Z",
-    "body": "---\nname: supreme-ai-sdk\ndescription: ...\n---\n\n# Supreme AI SDK integration skill\n..."
+    "id": 5,
+    "title": "Prestige Presenter",
+    "description": "Build polished client presentations from raw notes",
+    "content": "---\nname: prestige-presenter\ndescription: ...\n---\n\n# Prestige Presenter\n...",
+    "template": null,
+    "creator": { "id": 525, "name": "Aileen O'Connell", "email": null },
+    "is_owner": false,
+    "created_at": "2026-05-18T20:55:43.000000Z",
+    "updated_at": "2026-05-18T20:55:43.000000Z"
   }
 }
 ```
+
+`content` is `null` when no SKILL.md body has been authored for the skill yet.
 
 More detail: [docs/SKILLS_API.md](./docs/SKILLS_API.md)
 
@@ -875,7 +871,7 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 | `CreditSystemClient` | Imperative client |
 | `ReportsClient`, `PersonasClient`, `SkillsClient` | Standalone REST clients |
 | `ParentIntegrator` | Parent-page iframe helper |
-| Types | `User`, `Organization`, `Agent`, `Report`, `CreateReportParams`, `Skill`, `SkillVisibility`, `ListSkillsParams`, … |
+| Types | `User`, `Organization`, `Agent`, `Report`, `CreateReportParams`, `Skill`, `SkillSummary`, `SkillCreator`, `ListSkillsParams`, … |
 
 ---
 
@@ -888,6 +884,10 @@ MIT
 ## Changelog
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-05-27
+
+- Realigned Skills to the real backend shape and adopted a summary-in-list / content-on-detail pattern: `getSkills` now returns `SkillSummary[]` (no `content`), `getSkillById` returns `Skill` with packaged `content`. Field names follow the live API (`title`, `content`, `creator`, `is_owner`, `template`); dropped the speculative `visibility`/`organization_id`/`category`/`version` fields and the `SkillVisibility` export. [docs/SKILLS_API.md](docs/SKILLS_API.md) and the Skills section of the README updated to match.
 
 ### 2026-05-22
 
