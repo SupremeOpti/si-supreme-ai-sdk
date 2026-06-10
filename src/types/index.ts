@@ -16,6 +16,7 @@ export interface Organization {
   credits?: number;
   user_role_ids?: number[];
   roles?: Record<string, string>;        // e.g. { "15": "orgadmin", "8": "HR" }
+  has_active_kl?: boolean;               // true if the org has an active Knowledge Lake tenant
   agents?: {                              // agents nested within the org
     all?: Agent[];
     [roleId: string]: Agent[] | any;

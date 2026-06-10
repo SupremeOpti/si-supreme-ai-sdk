@@ -17,6 +17,7 @@ interface Organization {
     credits?: number;
     user_role_ids?: number[];
     roles?: Record<string, string>;
+    has_active_kl?: boolean;
     agents?: {
         all?: Agent[];
         [roleId: string]: Agent[] | any;
