@@ -94,6 +94,16 @@ export class AuthManager {
         }
       });
 
+      // Rate limited (429) means the server refused to answer, not that the
+      // token is invalid. Returning false here would push callers into
+      // refresh/logout flows for a perfectly valid session.
+      if (response.status === 429) {
+        if (this.debug) {
+          console.warn('[AuthManager] validate rate-limited (429) — treating token as still valid');
+        }
+        return true;
+      }
+
       const data = await response.json();
 
       return response.ok && data.success;
@@ -107,11 +117,18 @@ export class AuthManager {
 
   /**
    * Refresh JWT token
+   *
+   * On failure, `transient: true` marks outcomes that do NOT mean the
+   * session is over (rate limiting, server errors, network loss) — callers
+   * must retry later instead of treating them like an expired refresh
+   * token. `retryAfterSeconds` carries the server's Retry-After when sent.
    */
   async refreshToken(refreshToken: string): Promise<{
     success: boolean;
     tokens?: AuthTokens;
     message?: string;
+    transient?: boolean;
+    retryAfterSeconds?: number;
   }> {
     if (this.debug) {
       console.log('[AuthManager] 📤 Sending token refresh request to server');
@@ -171,9 +188,17 @@ export class AuthManager {
         if (this.debug) {
           console.error('[AuthManager] ❌ Token refresh failed:', data.message);
         }
+
+        const transient = response.status === 429 || response.status >= 500;
+        const retryAfterHeader = response.headers.get('Retry-After');
+
         return {
           success: false,
-          message: data.message || 'Token refresh failed'
+          message: data.message || 'Token refresh failed',
+          transient,
+          ...(transient && retryAfterHeader
+            ? { retryAfterSeconds: parseInt(retryAfterHeader, 10) || undefined }
+            : {})
         };
       }
     } catch (error: any) {
@@ -183,7 +208,9 @@ export class AuthManager {
 
       return {
         success: false,
-        message: error.message || 'Network error'
+        message: error.message || 'Network error',
+        // Network failure says nothing about the session — retry later.
+        transient: true
       };
     }
   }

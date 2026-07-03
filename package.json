@@ -1,6 +1,6 @@
 {
   "name": "@supreme-ai/si-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TypeScript SDK for Supreme AI - Credit System and Personas Management - Supports both embedded (iframe) and standalone modes",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

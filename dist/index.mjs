@@ -255,6 +255,12 @@ var AuthManager = class {
           "Accept": "application/json"
         }
       });
+      if (response.status === 429) {
+        if (this.debug) {
+          console.warn("[AuthManager] validate rate-limited (429) \u2014 treating token as still valid");
+        }
+        return true;
+      }
       const data = await response.json();
       return response.ok && data.success;
     } catch (error) {
@@ -266,6 +272,11 @@ var AuthManager = class {
   }
   /**
    * Refresh JWT token
+   *
+   * On failure, `transient: true` marks outcomes that do NOT mean the
+   * session is over (rate limiting, server errors, network loss) — callers
+   * must retry later instead of treating them like an expired refresh
+   * token. `retryAfterSeconds` carries the server's Retry-After when sent.
    */
   async refreshToken(refreshToken) {
     if (this.debug) {
@@ -318,9 +329,13 @@ var AuthManager = class {
         if (this.debug) {
           console.error("[AuthManager] \u274C Token refresh failed:", data.message);
         }
+        const transient = response.status === 429 || response.status >= 500;
+        const retryAfterHeader = response.headers.get("Retry-After");
         return {
           success: false,
-          message: data.message || "Token refresh failed"
+          message: data.message || "Token refresh failed",
+          transient,
+          ...transient && retryAfterHeader ? { retryAfterSeconds: parseInt(retryAfterHeader, 10) || void 0 } : {}
         };
       }
     } catch (error) {
@@ -329,7 +344,9 @@ var AuthManager = class {
       }
       return {
         success: false,
-        message: error.message || "Network error"
+        message: error.message || "Network error",
+        // Network failure says nothing about the session — retry later.
+        transient: true
       };
     }
   }
@@ -543,6 +560,23 @@ var StorageManager = class {
     return sessionStorage.getItem(this.prefix + key) !== null;
   }
 };
+
+// src/utils/jwt.ts
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return null;
+    const base64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(base64));
+  } catch {
+    return null;
+  }
+}
+function tokenHasRemainingLife(token, bufferSeconds = 30) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number") return false;
+  return payload.exp * 1e3 - Date.now() > bufferSeconds * 1e3;
+}
 
 // src/core/PersonasClient.ts
 var PersonasClient = class {
@@ -991,6 +1025,8 @@ var SkillsClient = class {
 var CreditSystemClient = class extends EventEmitter {
   constructor(config = {}) {
     super();
+    this.lastTokenRefreshAt = 0;
+    this.lastBalanceCheckAt = 0;
     this.parentResponseReceived = false;
     // Deep linking / route watcher state
     this.lastPath = "";
@@ -1227,9 +1263,9 @@ var CreditSystemClient = class extends EventEmitter {
     this.log("\u{1F5A5}\uFE0F Initializing standalone mode...");
     const savedAuth = this.storage.get("auth");
     if (savedAuth && savedAuth.token) {
-      this.log("\u{1F50D} Found saved JWT tokens, validating...");
+      this.log("\u{1F50D} Found saved JWT tokens, checking expiry locally...");
       this.log(`\u{1F464} Saved user: ${savedAuth.user?.email || "Unknown"}`);
-      const isValid = await this.authManager.validateToken(savedAuth.token);
+      const isValid = tokenHasRemainingLife(savedAuth.token);
       if (isValid) {
         this.log("\u2705 Token is valid!");
         this.state.user = savedAuth.user;
@@ -1273,6 +1309,7 @@ var CreditSystemClient = class extends EventEmitter {
   initializeWithToken() {
     this.state.isInitialized = true;
     this.startTokenRefreshTimer();
+    this.setupVisibilityCatchUp();
     if (this.config.features.credits) {
       this.checkBalance();
       if (this.config.balanceRefreshInterval > 0) {
@@ -1414,6 +1451,7 @@ var CreditSystemClient = class extends EventEmitter {
       this.log("\u26A0\uFE0F Balance check blocked: Not authenticated");
       return { success: false, error: "Not authenticated" };
     }
+    this.lastBalanceCheckAt = Date.now();
     this.log("\u{1F4B0} Fetching current balance...");
     this.log(`\u{1F464} User: ${this.state.user?.email} (ID: ${this.state.user?.id})`);
     try {
@@ -2412,8 +2450,21 @@ var CreditSystemClient = class extends EventEmitter {
   }
   /**
    * Refresh JWT token
+   *
+   * Single-flight: concurrent callers (timer tick + 401 retry + visibility
+   * catch-up) share one server request instead of racing.
    */
   async refreshToken() {
+    if (this.refreshInFlight) {
+      this.log("\u{1F504} Refresh already in flight \u2014 reusing pending request");
+      return this.refreshInFlight;
+    }
+    this.refreshInFlight = this.doRefreshToken().finally(() => {
+      this.refreshInFlight = void 0;
+    });
+    return this.refreshInFlight;
+  }
+  async doRefreshToken() {
     const auth = this.storage.get("auth");
     this.log("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550");
     this.log("\u{1F504} TOKEN REFRESH CYCLE STARTED");
@@ -2461,6 +2512,7 @@ var CreditSystemClient = class extends EventEmitter {
         if (hasNewRefreshToken) {
           this.state.refreshToken = result.tokens.refresh_token;
         }
+        this.lastTokenRefreshAt = Date.now();
         this.emit("tokenRefreshed");
         this.emit("tokensUpdated", {
           accessToken: result.tokens.access_token,
@@ -2477,6 +2529,11 @@ var CreditSystemClient = class extends EventEmitter {
         this.log("\u2728 TOKEN REFRESH CYCLE COMPLETED SUCCESSFULLY");
         this.log("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550");
         return true;
+      } else if (result.transient) {
+        const delaySeconds = Math.max(5, result.retryAfterSeconds ?? 60);
+        this.log(`\u23F3 TOKEN REFRESH DEFERRED (transient failure) \u2014 retrying in ${delaySeconds}s`);
+        this.scheduleRefreshRetry(delaySeconds * 1e3);
+        return false;
       } else {
         this.log("");
         this.log("\u274C TOKEN REFRESH FAILED: Invalid response from server");
@@ -2487,28 +2544,105 @@ var CreditSystemClient = class extends EventEmitter {
       this.log("\u274C TOKEN REFRESH ERROR:", error);
       this.log("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550");
     }
+    if (this.state.mode === "embedded") {
+      this.log("\u{1F501} Refresh token rejected \u2014 attempting silent re-auth via parent...");
+      const reminted = await this.requestTokenFromParent();
+      if (reminted) {
+        this.log("\u2705 Parent re-minted tokens \u2014 session continues");
+        return true;
+      }
+      this.log("\u274C Parent could not re-mint (session gone or no response)");
+    }
     this.log("\u26A0\uFE0F Token expired - authentication required");
     this.emit("tokenExpired");
     this.config.onTokenExpired();
     return false;
   }
   /**
+   * Ask the parent page for fresh tokens and wait for the (persistent)
+   * JWT_TOKEN_RESPONSE listener to process the reply. Resolves true when
+   * a new access token landed in state before the timeout.
+   */
+  async requestTokenFromParent(timeoutMs = 5e3) {
+    if (!this.state.isInIframe) {
+      return false;
+    }
+    const tokenBefore = this.state.accessToken;
+    this.messageBridge.sendToParent("REQUEST_JWT_TOKEN", {
+      origin: window.location.origin,
+      timestamp: Date.now()
+    });
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.state.accessToken && this.state.accessToken !== tokenBefore) {
+        return true;
+      }
+    }
+    return false;
+  }
+  scheduleRefreshRetry(delayMs) {
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+    }
+    this.refreshRetryTimer = setTimeout(() => {
+      this.refreshRetryTimer = void 0;
+      this.refreshToken();
+    }, delayMs);
+  }
+  /**
    * Start token refresh timer
+   *
+   * Ticks are skipped while the tab is hidden — a backgrounded tab has no
+   * one to serve, and fleets of idle tabs were generating thousands of
+   * refresh calls a day. The visibilitychange handler catches up the
+   * moment the tab is foregrounded, so the user never sees a stale token.
    */
   startTokenRefreshTimer() {
     this.clearTokenTimer();
+    this.lastTokenRefreshAt = Date.now();
     this.tokenTimer = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
       await this.refreshToken();
     }, this.config.tokenRefreshInterval);
   }
   /**
-   * Start balance refresh timer
+   * Start balance refresh timer (also idle while hidden — see above)
    */
   startBalanceRefreshTimer() {
     this.clearBalanceTimer();
     this.balanceTimer = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return;
+      }
       await this.checkBalance();
     }, this.config.balanceRefreshInterval);
+  }
+  /**
+   * When the tab becomes visible again, immediately refresh anything the
+   * hidden-tab timer skips: the token first (it may be past its refresh
+   * point, or expired outright), then the balance. This is the guarantee
+   * that a tab left open for hours resumes without a visible auth hiccup.
+   */
+  setupVisibilityCatchUp() {
+    if (typeof document === "undefined" || this.visibilityHandler) {
+      return;
+    }
+    this.visibilityHandler = async () => {
+      if (document.hidden || !this.state.isAuthenticated) {
+        return;
+      }
+      if (this.getAuthToken() && Date.now() - this.lastTokenRefreshAt >= this.config.tokenRefreshInterval) {
+        this.log("\u{1F441}\uFE0F Tab visible again \u2014 catching up token refresh");
+        await this.refreshToken();
+      }
+      if (this.config.features.credits && this.config.balanceRefreshInterval > 0 && Date.now() - this.lastBalanceCheckAt >= this.config.balanceRefreshInterval) {
+        this.checkBalance();
+      }
+    };
+    document.addEventListener("visibilitychange", this.visibilityHandler);
   }
   /**
    * Clear all timers
@@ -2516,6 +2650,10 @@ var CreditSystemClient = class extends EventEmitter {
   clearTimers() {
     this.clearTokenTimer();
     this.clearBalanceTimer();
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = void 0;
+    }
   }
   clearTokenTimer() {
     if (this.tokenTimer) {
@@ -2683,6 +2821,10 @@ var CreditSystemClient = class extends EventEmitter {
   destroy() {
     this.clearTimers();
     this.stopRouteWatcher();
+    if (this.visibilityHandler && typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = void 0;
+    }
     this.messageBridge.destroy();
     this.removeAllListeners();
     this.state.isInitialized = false;
@@ -3011,9 +3153,14 @@ function useSwitchOrganization() {
 }
 
 // src/parent/ParentIntegrator.ts
+var TOKEN_REUSE_MS = 6e4;
+var TOKEN_EXPIRY_BUFFER_MS = 12e4;
+var FETCH_FAILURE_BACKOFF_MS = 5e3;
 var ParentIntegrator = class {
   constructor(config) {
     this.iframe = null;
+    this.tokenFetchedAt = 0;
+    this.lastFetchFailedAt = 0;
     this.config = config;
     this.setupMessageListener();
   }
@@ -3089,21 +3236,41 @@ var ParentIntegrator = class {
     if (this.config.debug) {
       console.log("[ParentIntegrator] Iframe requesting JWT token");
     }
+    if (this.hasReusableToken()) {
+      if (this.config.debug) {
+        console.log("[ParentIntegrator] Serving JWT token from cache");
+      }
+      this.sendTokenResponse(this.cachedToken);
+      return;
+    }
+    if (this.lastFetchFailedAt && Date.now() - this.lastFetchFailedAt < FETCH_FAILURE_BACKOFF_MS) {
+      if (this.config.debug) {
+        console.log("[ParentIntegrator] Token fetch in failure backoff, not retrying yet");
+      }
+      this.sendToIframe("JWT_TOKEN_RESPONSE", {
+        token: null,
+        error: "Token fetch temporarily unavailable",
+        timestamp: Date.now()
+      });
+      return;
+    }
     try {
-      const tokenData = await this.config.getJWTToken();
+      if (!this.tokenFetchPromise) {
+        this.tokenFetchPromise = this.config.getJWTToken().finally(() => {
+          this.tokenFetchPromise = void 0;
+        });
+      }
+      const tokenData = await this.tokenFetchPromise;
       if (tokenData) {
         this.cachedToken = tokenData;
-        this.sendToIframe("JWT_TOKEN_RESPONSE", {
-          token: tokenData.token,
-          refreshToken: tokenData.refreshToken,
-          user: tokenData.user,
-          isSuperAdmin: tokenData.user?.is_superadmin ?? false,
-          timestamp: Date.now()
-        });
+        this.tokenFetchedAt = Date.now();
+        this.lastFetchFailedAt = 0;
+        this.sendTokenResponse(tokenData);
         if (this.config.debug) {
           console.log("[ParentIntegrator] JWT token sent to iframe");
         }
       } else {
+        this.lastFetchFailedAt = Date.now();
         this.sendToIframe("JWT_TOKEN_RESPONSE", {
           token: null,
           error: "Authentication required",
@@ -3117,12 +3284,31 @@ var ParentIntegrator = class {
       if (this.config.debug) {
         console.error("[ParentIntegrator] Error getting JWT token:", error);
       }
+      this.lastFetchFailedAt = Date.now();
       this.sendToIframe("JWT_TOKEN_RESPONSE", {
         token: null,
         error: error.message || "Failed to get token",
         timestamp: Date.now()
       });
     }
+  }
+  sendTokenResponse(tokenData) {
+    this.sendToIframe("JWT_TOKEN_RESPONSE", {
+      token: tokenData.token,
+      refreshToken: tokenData.refreshToken,
+      user: tokenData.user,
+      isSuperAdmin: tokenData.user?.is_superadmin ?? false,
+      timestamp: Date.now()
+    });
+  }
+  hasReusableToken() {
+    if (!this.cachedToken || !this.tokenFetchedAt) {
+      return false;
+    }
+    if (Date.now() - this.tokenFetchedAt < TOKEN_REUSE_MS) {
+      return true;
+    }
+    return typeof document !== "undefined" && document.hidden && tokenHasRemainingLife(this.cachedToken.token, TOKEN_EXPIRY_BUFFER_MS / 1e3);
   }
   /**
    * Handle user state request from iframe
@@ -3221,6 +3407,7 @@ var ParentIntegrator = class {
    */
   handleLogout() {
     this.cachedToken = void 0;
+    this.tokenFetchedAt = 0;
     if (this.config.onLogout) {
       this.config.onLogout();
     }
@@ -3307,6 +3494,7 @@ var ParentIntegrator = class {
     }
     this.iframe = null;
     this.cachedToken = void 0;
+    this.tokenFetchedAt = 0;
   }
 };
 

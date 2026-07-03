@@ -7,6 +7,7 @@ import { MessageBridge } from '../utils/MessageBridge';
 import { AuthManager } from '../utils/AuthManager';
 import { ApiClient } from '../utils/ApiClient';
 import { StorageManager } from '../utils/StorageManager';
+import { tokenHasRemainingLife } from '../utils/jwt';
 import { PersonasClient } from './PersonasClient';
 import { ReportsClient } from './ReportsClient';
 import { SkillsClient } from './SkillsClient';
@@ -54,6 +55,11 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   private skillsClient: SkillsClient;
   private tokenTimer?: NodeJS.Timeout;
   private balanceTimer?: NodeJS.Timeout;
+  private refreshRetryTimer?: NodeJS.Timeout;
+  private refreshInFlight?: Promise<boolean>;
+  private visibilityHandler?: () => void;
+  private lastTokenRefreshAt = 0;
+  private lastBalanceCheckAt = 0;
   private parentResponseReceived = false;
 
   // Deep linking / route watcher state
@@ -355,11 +361,15 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     const savedAuth = this.storage.get('auth');
 
     if (savedAuth && savedAuth.token) {
-      this.log('🔍 Found saved JWT tokens, validating...');
+      this.log('🔍 Found saved JWT tokens, checking expiry locally...');
       this.log(`👤 Saved user: ${savedAuth.user?.email || 'Unknown'}`);
 
-      // Validate token
-      const isValid = await this.authManager.validateToken(savedAuth.token);
+      // Check the token's exp claim locally instead of a server round-trip.
+      // The server stays the authority — a revoked-but-unexpired token is
+      // rejected with a 401 on the first real API call, which flows into
+      // the existing refresh-and-retry path. This removes one /validate
+      // call per SDK boot (SPAs construct the client on every mount).
+      const isValid = tokenHasRemainingLife(savedAuth.token);
 
       if (isValid) {
         this.log('✅ Token is valid!');
@@ -411,6 +421,9 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
 
     // Start token refresh timer
     this.startTokenRefreshTimer();
+
+    // Catch up token/balance when a backgrounded tab becomes visible again
+    this.setupVisibilityCatchUp();
 
     // Load initial balance only if credits feature is enabled
     if (this.config.features.credits) {
@@ -585,6 +598,8 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
       this.log('⚠️ Balance check blocked: Not authenticated');
       return { success: false, error: 'Not authenticated' };
     }
+
+    this.lastBalanceCheckAt = Date.now();
 
     this.log('💰 Fetching current balance...');
     this.log(`👤 User: ${this.state.user?.email} (ID: ${this.state.user?.id})`);
@@ -1847,8 +1862,24 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
 
   /**
    * Refresh JWT token
+   *
+   * Single-flight: concurrent callers (timer tick + 401 retry + visibility
+   * catch-up) share one server request instead of racing.
    */
   private async refreshToken(): Promise<boolean> {
+    if (this.refreshInFlight) {
+      this.log('🔄 Refresh already in flight — reusing pending request');
+      return this.refreshInFlight;
+    }
+
+    this.refreshInFlight = this.doRefreshToken().finally(() => {
+      this.refreshInFlight = undefined;
+    });
+
+    return this.refreshInFlight;
+  }
+
+  private async doRefreshToken(): Promise<boolean> {
     const auth = this.storage.get('auth');
 
     this.log('═══════════════════════════════════════════════════');
@@ -1909,6 +1940,7 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
         if (hasNewRefreshToken) {
           this.state.refreshToken = result.tokens.refresh_token!;
         }
+        this.lastTokenRefreshAt = Date.now();
 
         this.emit('tokenRefreshed');
         this.emit('tokensUpdated', {
@@ -1930,6 +1962,15 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
         this.log('═══════════════════════════════════════════════════');
 
         return true;
+      } else if (result.transient) {
+        // 429 / 5xx / network loss: the refresh token is NOT invalid, the
+        // server just couldn't answer right now. Emitting tokenExpired here
+        // would log a valid user out over a hiccup — schedule a single
+        // retry instead (honoring Retry-After when the server sent one).
+        const delaySeconds = Math.max(5, result.retryAfterSeconds ?? 60);
+        this.log(`⏳ TOKEN REFRESH DEFERRED (transient failure) — retrying in ${delaySeconds}s`);
+        this.scheduleRefreshRetry(delaySeconds * 1000);
+        return false;
       } else {
         this.log('');
         this.log('❌ TOKEN REFRESH FAILED: Invalid response from server');
@@ -1941,6 +1982,20 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
       this.log('═══════════════════════════════════════════════════');
     }
 
+    // The refresh token itself was rejected. In embedded mode the parent's
+    // web session usually still exists, so ask it to mint fresh tokens
+    // before declaring the session over — this is what lets a tab left
+    // open past the refresh token's 24h lifetime recover invisibly.
+    if (this.state.mode === 'embedded') {
+      this.log('🔁 Refresh token rejected — attempting silent re-auth via parent...');
+      const reminted = await this.requestTokenFromParent();
+      if (reminted) {
+        this.log('✅ Parent re-minted tokens — session continues');
+        return true;
+      }
+      this.log('❌ Parent could not re-mint (session gone or no response)');
+    }
+
     this.log('⚠️ Token expired - authentication required');
     this.emit('tokenExpired');
     this.config.onTokenExpired();
@@ -1948,25 +2003,112 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   }
 
   /**
+   * Ask the parent page for fresh tokens and wait for the (persistent)
+   * JWT_TOKEN_RESPONSE listener to process the reply. Resolves true when
+   * a new access token landed in state before the timeout.
+   */
+  private async requestTokenFromParent(timeoutMs = 5000): Promise<boolean> {
+    if (!this.state.isInIframe) {
+      return false;
+    }
+
+    const tokenBefore = this.state.accessToken;
+
+    this.messageBridge.sendToParent('REQUEST_JWT_TOKEN', {
+      origin: window.location.origin,
+      timestamp: Date.now()
+    });
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (this.state.accessToken && this.state.accessToken !== tokenBefore) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private scheduleRefreshRetry(delayMs: number): void {
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+    }
+
+    this.refreshRetryTimer = setTimeout(() => {
+      this.refreshRetryTimer = undefined;
+      this.refreshToken();
+    }, delayMs);
+  }
+
+  /**
    * Start token refresh timer
+   *
+   * Ticks are skipped while the tab is hidden — a backgrounded tab has no
+   * one to serve, and fleets of idle tabs were generating thousands of
+   * refresh calls a day. The visibilitychange handler catches up the
+   * moment the tab is foregrounded, so the user never sees a stale token.
    */
   private startTokenRefreshTimer(): void {
     this.clearTokenTimer();
+    this.lastTokenRefreshAt = Date.now();
 
     this.tokenTimer = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
       await this.refreshToken();
     }, this.config.tokenRefreshInterval);
   }
 
   /**
-   * Start balance refresh timer
+   * Start balance refresh timer (also idle while hidden — see above)
    */
   private startBalanceRefreshTimer(): void {
     this.clearBalanceTimer();
 
     this.balanceTimer = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
       await this.checkBalance();
     }, this.config.balanceRefreshInterval);
+  }
+
+  /**
+   * When the tab becomes visible again, immediately refresh anything the
+   * hidden-tab timer skips: the token first (it may be past its refresh
+   * point, or expired outright), then the balance. This is the guarantee
+   * that a tab left open for hours resumes without a visible auth hiccup.
+   */
+  private setupVisibilityCatchUp(): void {
+    if (typeof document === 'undefined' || this.visibilityHandler) {
+      return;
+    }
+
+    this.visibilityHandler = async () => {
+      if (document.hidden || !this.state.isAuthenticated) {
+        return;
+      }
+
+      if (
+        this.getAuthToken() &&
+        Date.now() - this.lastTokenRefreshAt >= this.config.tokenRefreshInterval
+      ) {
+        this.log('👁️ Tab visible again — catching up token refresh');
+        await this.refreshToken();
+      }
+
+      if (
+        this.config.features.credits &&
+        this.config.balanceRefreshInterval > 0 &&
+        Date.now() - this.lastBalanceCheckAt >= this.config.balanceRefreshInterval
+      ) {
+        this.checkBalance();
+      }
+    };
+
+    document.addEventListener('visibilitychange', this.visibilityHandler);
   }
 
   /**
@@ -1975,6 +2117,11 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   private clearTimers(): void {
     this.clearTokenTimer();
     this.clearBalanceTimer();
+
+    if (this.refreshRetryTimer) {
+      clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = undefined;
+    }
   }
 
   private clearTokenTimer(): void {
@@ -2178,6 +2325,10 @@ export class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
   destroy(): void {
     this.clearTimers();
     this.stopRouteWatcher();
+    if (this.visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = undefined;
+    }
     this.messageBridge.destroy();
     this.removeAllListeners();
     this.state.isInitialized = false;
