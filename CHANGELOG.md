@@ -10,8 +10,8 @@ config or API surface changes required in integrating apps.
 - **Rate limiting can no longer look like an expired session.** A `429` (or
   `5xx` / network loss) on token refresh is now treated as transient: the SDK
   schedules a single retry (honoring `Retry-After`) instead of emitting
-  `tokenExpired` / calling `onTokenExpired`. A `429` on `/validate` is treated
-  by falling back to a local expiry check rather than a hard validation failure.
+  `tokenExpired` / calling `onTokenExpired`. A `429` on `/validate` falls back
+  to a local expiry check instead of reporting a hard validation failure.
 - **Silent re-auth through the parent.** In embedded mode, when the refresh
   token itself is rejected (e.g. a tab left open past the 24 h refresh-token
   lifetime), the SDK now asks the parent page to mint fresh tokens from its
