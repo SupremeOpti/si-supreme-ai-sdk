@@ -1,5 +1,4 @@
-import * as react_jsx_runtime from 'react/jsx-runtime';
-import { ReactNode } from 'react';
+import React, { ReactNode } from 'react';
 
 /**
  * Supreme AI Credit SDK - Type Definitions
@@ -573,6 +572,11 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     private skillsClient;
     private tokenTimer?;
     private balanceTimer?;
+    private refreshRetryTimer?;
+    private refreshInFlight?;
+    private visibilityHandler?;
+    private lastTokenRefreshAt;
+    private lastBalanceCheckAt;
     private parentResponseReceived;
     private lastPath;
     private originalPushState?;
@@ -726,16 +730,39 @@ declare class CreditSystemClient extends EventEmitter<CreditSDKEvents> {
     requestUserSkills(): Promise<UserSkillsResult>;
     /**
      * Refresh JWT token
+     *
+     * Single-flight: concurrent callers (timer tick + 401 retry + visibility
+     * catch-up) share one server request instead of racing.
      */
     private refreshToken;
+    private doRefreshToken;
+    /**
+     * Ask the parent page for fresh tokens and wait for the (persistent)
+     * JWT_TOKEN_RESPONSE listener to process the reply. Resolves true when
+     * a new access token landed in state before the timeout.
+     */
+    private requestTokenFromParent;
+    private scheduleRefreshRetry;
     /**
      * Start token refresh timer
+     *
+     * Ticks are skipped while the tab is hidden — a backgrounded tab has no
+     * one to serve, and fleets of idle tabs were generating thousands of
+     * refresh calls a day. The visibilitychange handler catches up the
+     * moment the tab is foregrounded, so the user never sees a stale token.
      */
     private startTokenRefreshTimer;
     /**
-     * Start balance refresh timer
+     * Start balance refresh timer (also idle while hidden — see above)
      */
     private startBalanceRefreshTimer;
+    /**
+     * When the tab becomes visible again, immediately refresh anything the
+     * hidden-tab timer skips: the token first (it may be past its refresh
+     * point, or expired outright), then the balance. This is the guarantee
+     * that a tab left open for hours resumes without a visible auth hiccup.
+     */
+    private setupVisibilityCatchUp;
     /**
      * Clear all timers
      */
@@ -893,11 +920,15 @@ declare class SkillsClient {
 
 declare function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn;
 
+/**
+ * React Context Provider for Supreme AI Credit System SDK
+ */
+
 interface CreditSystemProviderProps {
     children: ReactNode;
     config?: CreditSDKConfig;
 }
-declare function CreditSystemProvider({ children, config }: CreditSystemProviderProps): react_jsx_runtime.JSX.Element;
+declare function CreditSystemProvider({ children, config }: CreditSystemProviderProps): React.JSX.Element;
 declare function useCreditContext(): UseCreditSystemReturn;
 
 /**
@@ -948,6 +979,9 @@ declare class ParentIntegrator {
     private iframe;
     private messageHandler?;
     private cachedToken?;
+    private tokenFetchedAt;
+    private tokenFetchPromise?;
+    private lastFetchFailedAt;
     constructor(config: ParentConfig);
     /**
      * Attach to an iframe element
@@ -961,6 +995,8 @@ declare class ParentIntegrator {
      * Handle JWT token request from iframe
      */
     private handleTokenRequest;
+    private sendTokenResponse;
+    private hasReusableToken;
     /**
      * Handle user state request from iframe
      */

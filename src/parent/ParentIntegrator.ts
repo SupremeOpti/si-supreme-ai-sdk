@@ -3,6 +3,7 @@
  */
 
 import type { User, AuthTokens } from '../types';
+import { tokenHasRemainingLife } from '../utils/jwt';
 
 export interface ParentConfig {
   getJWTToken: () => Promise<{
@@ -35,11 +36,25 @@ export interface ParentConfig {
   onError?: (error: string) => void;
 }
 
+// Token reuse policy for handleTokenRequest. Without it, every
+// REQUEST_JWT_TOKEN from the child triggered a fresh getJWTToken() call
+// (typically a server-side mint) — a child re-requesting on a timer turned
+// each open tab into a steady stream of mints. A token fetched less than
+// TOKEN_REUSE_MS ago is always answered from cache; in a hidden tab any
+// token whose exp claim is more than TOKEN_EXPIRY_BUFFER_MS away is reused.
+// The child is never denied a token — a stale cache still fetches live.
+const TOKEN_REUSE_MS = 60000;
+const TOKEN_EXPIRY_BUFFER_MS = 120000;
+const FETCH_FAILURE_BACKOFF_MS = 5000;
+
 export class ParentIntegrator {
   private config: ParentConfig;
   private iframe: HTMLIFrameElement | null = null;
   private messageHandler?: (event: MessageEvent) => void;
   private cachedToken?: { token: string; refreshToken: string; user: User };
+  private tokenFetchedAt = 0;
+  private tokenFetchPromise?: Promise<{ token: string; refreshToken: string; user: User } | null>;
+  private lastFetchFailedAt = 0;
 
   constructor(config: ParentConfig) {
     this.config = config;
@@ -139,27 +154,54 @@ export class ParentIntegrator {
       console.log('[ParentIntegrator] Iframe requesting JWT token');
     }
 
+    // Serve from cache when the last mint is still fresh (or, in a hidden
+    // tab, whenever the cached token has comfortable life left).
+    if (this.hasReusableToken()) {
+      if (this.config.debug) {
+        console.log('[ParentIntegrator] Serving JWT token from cache');
+      }
+      this.sendTokenResponse(this.cachedToken!);
+      return;
+    }
+
+    // Back off after a failed fetch so a child retry loop can't hammer
+    // the token endpoint; the child gets the same error it just got.
+    if (this.lastFetchFailedAt && Date.now() - this.lastFetchFailedAt < FETCH_FAILURE_BACKOFF_MS) {
+      if (this.config.debug) {
+        console.log('[ParentIntegrator] Token fetch in failure backoff, not retrying yet');
+      }
+      this.sendToIframe('JWT_TOKEN_RESPONSE', {
+        token: null,
+        error: 'Token fetch temporarily unavailable',
+        timestamp: Date.now()
+      });
+      return;
+    }
+
     try {
-      // Get JWT token from parent implementation
-      const tokenData = await this.config.getJWTToken();
+      // Get JWT token from parent implementation. Concurrent requests
+      // (several REQUEST_JWT_TOKEN messages during iframe boot) collapse
+      // into a single getJWTToken() call.
+      if (!this.tokenFetchPromise) {
+        this.tokenFetchPromise = this.config.getJWTToken().finally(() => {
+          this.tokenFetchPromise = undefined;
+        });
+      }
+      const tokenData = await this.tokenFetchPromise;
 
       if (tokenData) {
         this.cachedToken = tokenData;
+        this.tokenFetchedAt = Date.now();
+        this.lastFetchFailedAt = 0;
 
-        // Send token to iframe
-        this.sendToIframe('JWT_TOKEN_RESPONSE', {
-          token: tokenData.token,
-          refreshToken: tokenData.refreshToken,
-          user: tokenData.user,
-          isSuperAdmin: tokenData.user?.is_superadmin ?? false,
-          timestamp: Date.now()
-        });
+        this.sendTokenResponse(tokenData);
 
         if (this.config.debug) {
           console.log('[ParentIntegrator] JWT token sent to iframe');
         }
       } else {
         // Send failure response
+        this.lastFetchFailedAt = Date.now();
         this.sendToIframe('JWT_TOKEN_RESPONSE', {
           token: null,
           error: 'Authentication required',
@@ -175,12 +217,41 @@ export class ParentIntegrator {
         console.error('[ParentIntegrator] Error getting JWT token:', error);
       }
 
+      this.lastFetchFailedAt = Date.now();
       this.sendToIframe('JWT_TOKEN_RESPONSE', {
         token: null,
         error: error.message || 'Failed to get token',
         timestamp: Date.now()
       });
     }
+  }
+
+  private sendTokenResponse(tokenData: { token: string; refreshToken: string; user: User }): void {
+    this.sendToIframe('JWT_TOKEN_RESPONSE', {
+      token: tokenData.token,
+      refreshToken: tokenData.refreshToken,
+      user: tokenData.user,
+      isSuperAdmin: tokenData.user?.is_superadmin ?? false,
+      timestamp: Date.now()
+    });
+  }
+
+  private hasReusableToken(): boolean {
+    if (!this.cachedToken || !this.tokenFetchedAt) {
+      return false;
+    }
+
+    if (Date.now() - this.tokenFetchedAt < TOKEN_REUSE_MS) {
+      return true;
+    }
+
+    // Hidden tab: any token that hasn't neared expiry is good enough —
+    // no one is interacting, so a freshly minted window buys nothing.
+    return (
+      typeof document !== 'undefined' &&
+      document.hidden &&
+      tokenHasRemainingLife(this.cachedToken.token, TOKEN_EXPIRY_BUFFER_MS / 1000)
+    );
   }
 
   /**
@@ -297,6 +368,7 @@ export class ParentIntegrator {
    */
   private handleLogout(): void {
     this.cachedToken = undefined;
+    this.tokenFetchedAt = 0;
 
     if (this.config.onLogout) {
       this.config.onLogout();
@@ -401,5 +473,6 @@ export class ParentIntegrator {
     }
     this.iframe = null;
     this.cachedToken = undefined;
+    this.tokenFetchedAt = 0;
   }
 }
