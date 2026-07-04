@@ -198,6 +198,23 @@ var MessageBridge = class extends EventEmitter {
   }
 };
 
+// src/utils/jwt.ts
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return null;
+    const base64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(base64));
+  } catch {
+    return null;
+  }
+}
+function tokenHasRemainingLife(token, bufferSeconds = 30) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== "number") return false;
+  return payload.exp * 1e3 - Date.now() > bufferSeconds * 1e3;
+}
+
 // src/utils/AuthManager.ts
 var AuthManager = class {
   constructor(authUrl, debug = false) {
@@ -257,9 +274,9 @@ var AuthManager = class {
       });
       if (response.status === 429) {
         if (this.debug) {
-          console.warn("[AuthManager] validate rate-limited (429) \u2014 treating token as still valid");
+          console.warn("[AuthManager] validate rate-limited (429) \u2014 falling back to local expiry check");
         }
-        return true;
+        return tokenHasRemainingLife(token);
       }
       const data = await response.json();
       return response.ok && data.success;
@@ -560,23 +577,6 @@ var StorageManager = class {
     return sessionStorage.getItem(this.prefix + key) !== null;
   }
 };
-
-// src/utils/jwt.ts
-function decodeJwtPayload(token) {
-  try {
-    const part = token.split(".")[1];
-    if (!part) return null;
-    const base64 = part.replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(atob(base64));
-  } catch {
-    return null;
-  }
-}
-function tokenHasRemainingLife(token, bufferSeconds = 30) {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload.exp !== "number") return false;
-  return payload.exp * 1e3 - Date.now() > bufferSeconds * 1e3;
-}
 
 // src/core/PersonasClient.ts
 var PersonasClient = class {

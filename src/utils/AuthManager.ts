@@ -3,6 +3,7 @@
  */
 
 import type { AuthTokens, User } from '../types';
+import { tokenHasRemainingLife } from './jwt';
 
 interface LoginResponse {
   success: boolean;
@@ -95,13 +96,16 @@ export class AuthManager {
       });
 
       // Rate limited (429) means the server refused to answer, not that the
-      // token is invalid. Returning false here would push callers into
-      // refresh/logout flows for a perfectly valid session.
+      // token is invalid. Returning false would push callers into
+      // refresh/logout flows for a perfectly valid session, so answer with
+      // the strongest claim a client of an HS256 scheme can make locally:
+      // the token is not expired (the server still signature-checks it on
+      // every real request, and a bad token 401s into the refresh path).
       if (response.status === 429) {
         if (this.debug) {
-          console.warn('[AuthManager] validate rate-limited (429) — treating token as still valid');
+          console.warn('[AuthManager] validate rate-limited (429) — falling back to local expiry check');
         }
-        return true;
+        return tokenHasRemainingLife(token);
       }
 
       const data = await response.json();

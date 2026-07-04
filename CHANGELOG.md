@@ -11,7 +11,7 @@ config or API surface changes required in integrating apps.
   `5xx` / network loss) on token refresh is now treated as transient: the SDK
   schedules a single retry (honoring `Retry-After`) instead of emitting
   `tokenExpired` / calling `onTokenExpired`. A `429` on `/validate` is treated
-  as "token still valid" rather than a validation failure.
+  by falling back to a local expiry check rather than a hard validation failure.
 - **Silent re-auth through the parent.** In embedded mode, when the refresh
   token itself is rejected (e.g. a tab left open past the 24 h refresh-token
   lifetime), the SDK now asks the parent page to mint fresh tokens from its
