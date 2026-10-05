@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { createSiServerClient, InvalidArgumentError, memoryLockStore, MisconfiguredKeyError, SERVER_SDK_VERSION } from '../../src/server';
+import { createSiServerClient, InvalidArgumentError, memoryLockStore, MisconfiguredKeyError, SERVER_SDK_VERSION, SUPABASE_LOCK_STORE_SQL } from '../../src/server';
 import { parseRetryAfter } from '../../src/server/http';
 import { fakeFetch, ok, silentLogger } from './helpers';
 
@@ -60,5 +60,13 @@ describe('parseRetryAfter', () => {
     expect(parseRetryAfter('soon')).toBeNull();
     const now = Date.UTC(2026, 9, 5, 12, 0, 0);
     expect(parseRetryAfter('Mon, 05 Oct 2026 12:00:03 GMT', now)).toBe(3000);
+  });
+});
+
+describe('docs/SERVER.md', () => {
+  it('carries the exact Supabase lock store migration', () => {
+    const doc = readFileSync(join(root, 'docs', 'SERVER.md'), 'utf8');
+    const body = SUPABASE_LOCK_STORE_SQL.split('\n').slice(1).join('\n').trim();
+    expect(doc).toContain(body);
   });
 });

@@ -57,6 +57,13 @@ Override with `reportsApiBaseUrl` if needed.
 
 Personas use the API root (credits base with `/secure-credits/jwt` removed), e.g. `https://app.supremegroup.ai/api`.
 
+Server entry (`@supreme-ai/si-sdk/server`, server-side only, see [Server entry](#server-entry)):
+
+| Variable | Maps to `SiServerConfig` | Notes |
+|----------|--------------------------|-------|
+| `SI_MEMBERSHIP_KEY` | `membershipKey` | The app's `membership_api` key. Secret: never in a client bundle or `VITE_*` variable. |
+| `SI_BASE_URL` (suggested) | `baseUrl` | e.g. `https://app.supremegroup.ai` |
+
 ---
 
 ## Quick start (React)
@@ -135,6 +142,17 @@ Token storage key prefix: `creditSystem_` (configurable via `storagePrefix`).
 | Reports | `listReports`, `getReport`, `createReport`, `updateReport` | under `reportsApiBaseUrl` |
 | Skills | `getSkills`, `getSkillById` | under `skillsApiBaseUrl` |
 | Embedded only | `requestCurrentUserState`, `requestUserOrganizations`, `requestUserPersonas`, `requestUserSkills` | postMessage to parent |
+
+Server entry (`@supreme-ai/si-sdk/server`, `createSiServerClient(config)`):
+
+| Section | Method | HTTP (when applicable) |
+|---------|--------|-------------------------|
+| Membership | `si.membership.get`, `requireOrg`, `findOrganization`, `invalidate` | `GET /api/membership/users/{user}/organizations` |
+| Organizations | `si.organizations.resolve` (slug or id) | via membership |
+| MCP | `si.mcp.conversationKey`, `scopeToolCall`, `labelResult`, `errorResult`, `listOrganizationsTool`, `annotations` | via membership |
+| Locks | `si.locks.bindOrg`, `release` | lock store adapter |
+| Detection | `si.detection.recordRead`, `checkWrite` | cache adapter |
+| Audit | `si.audit.emit`, `flush`, `forwarding` | `POST /api/membership/audit-events` (opt-in, not live yet) |
 
 ---
 
@@ -813,6 +831,82 @@ Configure allowed parent origins via `allowedOrigins` in config.
 
 ---
 
+### Server entry
+
+`@supreme-ai/si-sdk/server` (since 1.2.0) is a separate, **server-only** entry for app MCP servers and APIs that trust SI for identity, membership, roles and app grants. It holds the app's secret `membership_api` key, is never re-exported from the browser entry, and resolves to a throwing stub under the `browser` export condition. Zero runtime dependencies; runs on Node 18+, Next.js (Node and Edge), Supabase edge functions (Deno) and Workers. Every failure denies (fail closed).
+
+Full contract, adapter interface, org-isolation model and a worked MCP tool handler: [docs/SERVER.md](docs/SERVER.md).
+
+```ts
+import { createSiServerClient, supabaseLockStore, annotations } from "@supreme-ai/si-sdk/server";
+
+const si = createSiServerClient({
+  baseUrl: "https://app.supremegroup.ai",
+  membershipKey: process.env.SI_MEMBERSHIP_KEY!,
+  locks: supabaseLockStore(serviceRoleSupabase), // shared conversation-key lock store
+});
+
+// In an MCP tools/call handler:
+try {
+  const scope = await si.mcp.scopeToolCall({
+    userId: siUserId,                 // Supreme JWT `sub`
+    clientId,                         // OAuth client id
+    conversationKey: si.mcp.conversationKey({ headers: req.headers, meta: params._meta }),
+    organization: args.organization,  // slug (preferred) or id
+    tool: "canvas_update",
+    kind: "write",
+  });
+  // scope.organization.id → scope your queries with it
+  // scope.roles, scope.appGrant → app permission logic
+  return si.mcp.labelResult({ content: [{ type: "text", text: "Done." }] }, scope);
+} catch (err) {
+  return si.mcp.errorResult(err);
+}
+```
+
+`scopeToolCall` returns:
+
+```json
+{
+  "organization": { "id": 2, "slug": "kadiko", "name": "Kadiko" },
+  "roles": ["client"],
+  "appGrant": "organization",
+  "mode": "locked",
+  "keyHash": "3b4c…64 hex",
+  "warning": null,
+  "userId": "456",
+  "principalId": "456",
+  "clientId": "chatgpt",
+  "tool": "canvas_update",
+  "kind": "write"
+}
+```
+
+| Piece | Behaviour |
+|-------|-----------|
+| Membership | Wraps `GET /api/membership/users/{user}/organizations` (SI-374). Cache: allow ≤ 300 s, deny (empty list, `user_not_found`) ≤ 30 s; callers may lower, never raise. Network error, timeout, 5xx, `429` without fresh cache, malformed body → `SiUnavailableError`. |
+| Org resolution | `organization` argument as slug or numeric id; unknown and not-allowed both → `OrgAccessDeniedError`. |
+| Conversation key | `_meta["openai/session"]` → Codex conversation header → `X-SI-Conversation` → `null`. Never `Mcp-Session-Id`. |
+| Lock | With a key: first org binds `(principal, client, sha256(key))` for a sliding 24 h, another org → `OrgLockedError`. No key → soft mode. |
+| Label | `structuredContent.organization` + `[Org: Name (slug)]` banner line (+ detection warning). |
+| Detection | Read org A then write org B within 15 min (same principal + client) → warning on the write. Never blocks. |
+| Audit | `onAudit(event)` hook on every call. Forwarding to SI (`auditForwarding: { enabled: true }`) is opt-in, default off: available once SI enables the endpoint (SI-379). |
+
+Adapters: `memoryCache()` (fine in production), `memoryLockStore()` (tests/dev only), `supabaseLockStore(client)` with the SQL in [docs/SERVER.md](docs/SERVER.md#supabase-lock-store) (also exported as `SUPABASE_LOCK_STORE_SQL`).
+
+Errors (all extend `SiServerError`, stable `code`): `OrgAccessDeniedError` (`org_access_denied`), `OrgLockedError` (`org_locked`), `UserGoneError` (`user_not_found`: revoke the connection), `SiUnavailableError` (`si_unavailable`), `MisconfiguredKeyError` (`misconfigured_key`), `AppInactiveError` (`app_inactive`), `LockStoreUnavailableError` (`lock_store_unavailable`), `InvalidArgumentError` (`invalid_argument`).
+
+Deno / Supabase edge functions import the built ESM by URL, pinned to a commit SHA:
+
+```jsonc
+// supabase/functions/deno.json
+{ "imports": { "@si/server": "https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<40-char-sha>/dist/server.mjs" } }
+```
+
+Apps using `si-sdk/server` (bump each on release): none yet. si-canva adopts in SI-380.
+
+---
+
 ## Configuration reference
 
 ```ts
@@ -839,6 +933,27 @@ interface CreditSDKConfig {
   deepLinking?: boolean;            // embedded: notify parent on route change
   onAuthRequired?: () => void;
   onTokenExpired?: () => void;
+}
+```
+
+Server entry config (`createSiServerClient`), full detail in [docs/SERVER.md](docs/SERVER.md#configuration):
+
+```ts
+interface SiServerConfig {
+  baseUrl: string;                 // https (http only for localhost)
+  membershipKey: string;           // SI_MEMBERSHIP_KEY
+  cache?: CacheAdapter;            // default memoryCache()
+  locks?: LockStoreAdapter;        // default memoryLockStore() + warning
+  fetch?: FetchLike;               // default global fetch
+  logger?: Logger;                 // default console
+  timeoutMs?: number;              // default 3000 per attempt
+  membership?: { allowTtlSeconds?: number; denyTtlSeconds?: number }; // caps 300 / 30
+  lockTtlSeconds?: number;         // default 86400
+  detection?: { enabled?: boolean; windowSeconds?: number };          // true / 900
+  conversation?: { codexHeaders?: string[]; siHeader?: string };
+  onAudit?: (event: AuditEvent) => void | Promise<void>;
+  auditForwarding?: { enabled?: boolean; batchSize?: number; flushIntervalMs?: number }; // enabled: false
+  now?: () => number;
 }
 ```
 
@@ -873,6 +988,18 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 | `ParentIntegrator` | Parent-page iframe helper |
 | Types | `User`, `Organization`, `Agent`, `Report`, `CreateReportParams`, `Skill`, `SkillSummary`, `SkillCreator`, `ListSkillsParams`, … |
 
+`@supreme-ai/si-sdk/server` (server-only):
+
+| Export | Description |
+|--------|-------------|
+| `createSiServerClient` | Server client: `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
+| `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL` | Adapters and the Supabase migration |
+| `conversationKey`, `hashConversationKey` | Conversation-key resolver and SHA-256 hash |
+| `annotations`, `labelResult`, `errorResult`, `orgBanner` | MCP helpers |
+| `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `isSiServerError` | Errors |
+| `SERVER_SDK_VERSION`, `MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER` | Constants |
+| Types | `SiServerConfig`, `Membership`, `ResolvedOrganization`, `ToolScope`, `ScopeToolCallInput`, `McpToolResult`, `AuditEvent`, `CacheAdapter`, `LockStoreAdapter`, … |
+
 ---
 
 ## License
@@ -884,6 +1011,11 @@ MIT
 ## Changelog
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-10-05
+
+- Added the server-only entry `@supreme-ai/si-sdk/server` (1.2.0, SI-378): `createSiServerClient` with membership (`GET /api/membership/users/{user}/organizations`, fail closed, capped cache), slug-or-id org resolution, conversation-key lock (`memoryLockStore`, `supabaseLockStore` + SQL), cross-org detection, MCP helpers (`scopeToolCall`, `labelResult`, `annotations`, `listOrganizationsTool`, `errorResult`) and opt-in audit forwarding to `POST /api/membership/audit-events` (off by default; endpoint not live yet). New `./server` export with a throwing `browser` stub, `tsconfig.server.json` (no DOM), first jest suite. Docs: [docs/SERVER.md](docs/SERVER.md), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
+- Added the implementation plan [docs/plans/server-entry-plan.md](docs/plans/server-entry-plan.md).
 
 ### 2026-05-27
 

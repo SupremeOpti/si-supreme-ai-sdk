@@ -1,6 +1,6 @@
 ---
 name: supreme-ai-sdk
-description: Install, configure, and integrate `@supreme-ai/si-sdk` (Supreme Intelligence SDK) in a consumer app — JWT auth, credits, AI agents, personas, reports, iframe embedding. TRIGGER when the user is installing this SDK fresh, wiring it into an existing app, or hitting issues with conflicting auth systems (Supabase, NextAuth, Auth0, Firebase, Clerk, Gmail OAuth) or Lovable-scaffolded projects. Also use when the user mentions "Supreme Intelligence", `app.supremegroup.ai`, JWT login conflicts, iframe/parent postMessage problems, or credits/agents/reports/personas integration.
+description: Install, configure, and integrate `@supreme-ai/si-sdk` (Supreme Intelligence SDK) in a consumer app — JWT auth, credits, AI agents, personas, reports, iframe embedding. TRIGGER when the user is installing this SDK fresh, wiring it into an existing app, or hitting issues with conflicting auth systems (Supabase, NextAuth, Auth0, Firebase, Clerk, Gmail OAuth) or Lovable-scaffolded projects. Also use when the user mentions "Supreme Intelligence", `app.supremegroup.ai`, JWT login conflicts, iframe/parent postMessage problems, or credits/agents/reports/personas integration, or is building an app's server side (MCP server, edge function, API route) that checks SI membership/org access with `@supreme-ai/si-sdk/server` or `SI_MEMBERSHIP_KEY`.
 ---
 
 # Supreme AI SDK integration skill
@@ -19,6 +19,7 @@ Authoritative reference: the SDK's own [README.md](https://github.com/SupremeOpt
   - Mode is auto-detected (`mode: 'auto'`) by checking `window !== window.parent`. Override with `mode: 'standalone'` or `mode: 'embedded'` for dev.
 - The SDK uses a JWT issued by Supreme Group's auth service. Every REST call sends `Authorization: Bearer <access_token>`. There is **no Supabase, no NextAuth, no OAuth provider** in the loop — the SDK fully owns the session.
 - It exposes credits, AI agents, personas, and reports as both a React hook (`useCreditSystem`) and an imperative client (`CreditSystemClient`).
+- A separate **server-only** entry, `@supreme-ai/si-sdk/server`, is for the app's own backend (MCP server, Supabase edge function, Next.js route handler). It holds an app secret and checks SI membership per call. See section 10. Never import it from browser code.
 
 If the dev's mental model is "I'll add Supreme on top of my existing auth," correct them: the SDK replaces the auth layer for any feature that touches Supreme APIs. Co-existing with a separate, unrelated auth system (e.g. Supabase only for your own RLS tables, completely walled off from Supreme calls) is possible but rarely worth the complexity — recommend picking one.
 
@@ -211,6 +212,21 @@ Tell the dev plainly if they expect any of these:
 
 ---
 
-## 10. When in doubt
+## 10. Server entry: `@supreme-ai/si-sdk/server`
+
+Use it when the app's **server** must ask SI "can user X use this app in org Y right now?", typically in the app's MCP server. Full contract: [docs/SERVER.md](https://github.com/SupremeOpti/si-supreme-ai-sdk/blob/main/docs/SERVER.md).
+
+- **Server only.** It needs the app's `membership_api` key in `SI_MEMBERSHIP_KEY` (a server secret: never `VITE_*`, never in a client bundle, never forwarded to MCP clients). Importing it in browser code hits a stub that throws.
+- **Node / Next.js:** `import { createSiServerClient } from '@supreme-ai/si-sdk/server'`.
+- **Supabase edge functions (Deno):** import `https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<commit-sha>/dist/server.mjs` via `deno.json` `imports`. Pin a full commit SHA, never a branch or tag.
+- **Every org-scoped MCP tool** takes an `organization` argument (slug preferred), calls `si.mcp.scopeToolCall({ userId, clientId, conversationKey, organization, tool, kind })`, scopes its queries with `scope.organization.id`, returns `si.mcp.labelResult(result, scope)`, and on error returns `si.mcp.errorResult(err)`. Annotate tools with `annotations.read` / `.write` / `.destructive`. Expose `si.mcp.listOrganizationsTool()`.
+- **Do not** add a server-side "current org" / `select_instance` tool, and never key anything on `Mcp-Session-Id` (Claude shares one session across conversations; MCP `2026-07-28` removes sessions). Use `si.mcp.conversationKey(...)`.
+- **Production lock store:** pass `locks: supabaseLockStore(serviceRoleClient)` and apply the SQL from docs/SERVER.md (or `SUPABASE_LOCK_STORE_SQL`). `memoryLockStore()` is for tests.
+- **It fails closed.** Errors are thrown, not returned. `UserGoneError` (`user_not_found`) means revoke the user's connection.
+- Audit forwarding to SI (`auditForwarding: { enabled: true }`) stays **off** until SI announces the endpoint is live.
+
+---
+
+## 11. When in doubt
 
 Read the SDK's [README.md](https://github.com/SupremeOpti/si-supreme-ai-sdk#readme) and the [Changelog](https://github.com/SupremeOpti/si-supreme-ai-sdk#changelog) at the bottom for recent API changes. If a method, endpoint, or config field is not documented there, do not invent it — surface the gap to the dev and stop.
