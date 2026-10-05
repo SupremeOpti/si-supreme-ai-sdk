@@ -33,13 +33,10 @@ function readHeader(headers: HeadersInput, name: string): string | null {
 }
 
 /**
- * Best available per-conversation key, in priority order:
- * `_meta["openai/session"]` (ChatGPT) → Codex conversation header →
- * `X-SI-Conversation` (Claude Code `headersHelper`, SI's own agents) → `null`.
- *
- * Never reads `Mcp-Session-Id`: Claude shares one MCP session across every
- * conversation, and MCP `2026-07-28` removes sessions. The key is a guard
- * against model confusion, **never** an authorization input.
+ * Best available per-conversation key: `_meta["openai/session"]` (ChatGPT) →
+ * Codex header → `X-SI-Conversation` → `null`. Never `Mcp-Session-Id`, which
+ * Claude shares across conversations. A guard against model confusion, never
+ * an authorization input.
  */
 export function conversationKey(source: ConversationKeySource | null | undefined, options: ConversationKeyOptions = {}): string | null {
   if (!source) return null;

@@ -1016,6 +1016,7 @@ MIT
 
 - Added the server-only entry `@supreme-ai/si-sdk/server` (1.2.0, SI-378): `createSiServerClient` with membership (`GET /api/membership/users/{user}/organizations`, fail closed, capped cache), slug-or-id org resolution, conversation-key lock (`memoryLockStore`, `supabaseLockStore` + SQL), cross-org detection, MCP helpers (`scopeToolCall`, `labelResult`, `annotations`, `listOrganizationsTool`, `errorResult`) and opt-in audit forwarding to `POST /api/membership/audit-events` (off by default; endpoint not live yet). New `./server` export with a throwing `browser` stub, `tsconfig.server.json` (no DOM), first jest suite. Docs: [docs/SERVER.md](docs/SERVER.md), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 - Added the implementation plan [docs/plans/server-entry-plan.md](docs/plans/server-entry-plan.md).
+- `SUPABASE_LOCK_STORE_SQL`: each new bind now purges up to 100 lock rows expired over a day ago (executable retention, replaces the optional pg_cron comment); stored data and retention documented in [docs/SERVER.md](docs/SERVER.md#supabase-lock-store). Tightened the `conversationKey` doc comment in [conversation.ts](src/server/conversation.ts).
 
 ### 2026-05-27
 

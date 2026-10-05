@@ -444,6 +444,13 @@ begin
   returning l.value into v_value;
 
   if found then
+    -- Retention: each new bind purges up to 100 rows expired over a day ago.
+    delete from public.si_conversation_locks
+     where key in (select g.key from public.si_conversation_locks g
+                    where g.expires_at < now() - interval '1 day'
+                    order by g.expires_at
+                    limit 100
+                    for update skip locked);
     return query select true, v_value;
     return;
   end if;
@@ -482,11 +489,9 @@ grant execute on function public.si_lock_get(text) to service_role;
 grant execute on function public.si_lock_set_if_absent(text, text, integer) to service_role;
 grant execute on function public.si_lock_touch(text, integer) to service_role;
 grant execute on function public.si_lock_delete(text) to service_role;
-
--- Optional housekeeping (pg_cron):
--- select cron.schedule('si-lock-gc', '17 * * * *',
---   $$delete from public.si_conversation_locks where expires_at < now() - interval '1 day'$$);
 ```
+
+**Stored data and retention.** One row per bound conversation: `key` = `si:lock:{principalId}:{clientId}:{sha256(conversation key)}`, `value` = the org id, `expires_at`. No request content, names or messages. Rows expire 24 h after last use (sliding) and are ignored once expired; each new bind deletes up to 100 rows that expired more than a day ago, so retention is bounded without pg_cron.
 
 Atomicity: the primary key plus `INSERT ... ON CONFLICT DO UPDATE ... WHERE expired`. Of two racing first binds, the second waits on the key, sees the committed live row and gets the winner's value. The test suite runs this SQL against Postgres 16 when `SI_TEST_PG_URL` is set, including the race. With a custom `functionPrefix`, rename the functions in the migration to match.
 

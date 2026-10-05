@@ -80,6 +80,17 @@ d('SUPABASE_LOCK_STORE_SQL on Postgres', () => {
     expect(results.every((r) => r.endsWith(`|${winner}`))).toBe(true);
   });
 
+  it('a new bind purges rows expired over a day ago, bounded to 100', () => {
+    psql(`insert into si_conversation_locks select 'gc-' || i, '2', now() - interval '2 days' from generate_series(1, 150) i`);
+    psql(`insert into si_conversation_locks values ('gc-recent', '2', now() - interval '1 hour')`);
+    psql(`select si_lock_set_if_absent('gc-trigger', '2', 60)`);
+    expect(psql(`select count(*) from si_conversation_locks where key like 'gc-%' and expires_at < now() - interval '1 day'`)).toBe('50');
+    expect(psql(`select count(*) from si_conversation_locks where key = 'gc-recent'`)).toBe('1');
+    // A bind that finds a live row does not purge.
+    psql(`select si_lock_set_if_absent('gc-trigger', '29', 60)`);
+    expect(psql(`select count(*) from si_conversation_locks where key like 'gc-%' and expires_at < now() - interval '1 day'`)).toBe('50');
+  });
+
   it('anon and authenticated cannot execute the functions', () => {
     expect(() => psql(`set role anon; select si_lock_get('a')`)).toThrow(/permission denied/);
     expect(() => psql(`set role authenticated; select si_lock_set_if_absent('x', '1', 60)`)).toThrow(/permission denied/);
