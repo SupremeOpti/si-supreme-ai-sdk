@@ -837,6 +837,8 @@ Configure allowed parent origins via `allowedOrigins` in config.
 
 Full contract, adapter interface, org-isolation model and a worked MCP tool handler: [docs/SERVER.md](docs/SERVER.md).
 
+**`userId` must be the authenticated caller** (the `sub` of the token your server verified), never a value from tool arguments or request input: v1 trusts it and does not verify tokens itself (that arrives with SI-375). See [Identity](docs/SERVER.md#identity-who-userid-is).
+
 ```ts
 import { createSiServerClient, supabaseLockStore, annotations } from "@supreme-ai/si-sdk/server";
 
@@ -849,7 +851,7 @@ const si = createSiServerClient({
 // In an MCP tools/call handler:
 try {
   const scope = await si.mcp.scopeToolCall({
-    userId: siUserId,                 // Supreme JWT `sub`
+    userId: siUserId,                 // verified token `sub`; never from tool args
     clientId,                         // OAuth client id
     conversationKey: si.mcp.conversationKey({ headers: req.headers, meta: params._meta }),
     organization: args.organization,  // slug (preferred) or id
@@ -1017,6 +1019,7 @@ MIT
 - Added the server-only entry `@supreme-ai/si-sdk/server` (1.2.0, SI-378): `createSiServerClient` with membership (`GET /api/membership/users/{user}/organizations`, fail closed, capped cache), slug-or-id org resolution, conversation-key lock (`memoryLockStore`, `supabaseLockStore` + SQL), cross-org detection, MCP helpers (`scopeToolCall`, `labelResult`, `annotations`, `listOrganizationsTool`, `errorResult`) and opt-in audit forwarding to `POST /api/membership/audit-events` (off by default; endpoint not live yet). New `./server` export with a throwing `browser` stub, `tsconfig.server.json` (no DOM), first jest suite. Docs: [docs/SERVER.md](docs/SERVER.md), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 - Added the implementation plan [docs/plans/server-entry-plan.md](docs/plans/server-entry-plan.md).
 - `SUPABASE_LOCK_STORE_SQL`: each new bind now purges up to 100 lock rows expired over a day ago (executable retention, replaces the optional pg_cron comment); stored data and retention documented in [docs/SERVER.md](docs/SERVER.md#supabase-lock-store). Tightened the `conversationKey` doc comment in [conversation.ts](src/server/conversation.ts).
+- Documented that `userId` passed to the server entry must be the verified caller, never request input (v1 does not verify tokens): [docs/SERVER.md](docs/SERVER.md#identity-who-userid-is), README, SKILL.md, JSDoc in [mcp.ts](src/server/mcp.ts).
 
 ### 2026-05-27
 

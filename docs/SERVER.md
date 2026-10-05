@@ -6,7 +6,7 @@ Server-side helpers for app MCP servers and APIs that trust Supreme Intelligence
 - **Runtime-neutral.** Only `fetch`, Web Crypto, `URL`, `TextEncoder`, `AbortController`, `setTimeout`. Runs on Node 18+, Next.js route handlers / server actions (Node and Edge runtimes), Supabase edge functions (Deno) and Workers. No runtime dependencies.
 - **Fails closed.** Network error, timeout, 5xx, `429` without a fresh cached answer, malformed body, rejected or misconfigured key, inactive app: every one is a deny (a thrown error). No code path returns "allowed" without a successful SI answer.
 
-Contents: [Install](#install) · [Configuration](#configuration) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
+Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#identity-who-userid-is) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
 
 ---
 
@@ -100,6 +100,10 @@ interface SiServerConfig {
 TTLs above the caps are clamped down. `0` disables that cache.
 
 ---
+
+## Identity: who `userId` is
+
+v1 does **not** authenticate the caller. `userId` (and `principalId`) passed to `scopeToolCall`, `listOrganizationsTool().handler`, `membership.*` and `organizations.resolve` is trusted as the identity to check. It **must** come from the token your server verified for this request (the Supreme JWT `sub` captured at consent, or your own session bound to it), never from tool arguments, query strings or headers the client controls. Passing a request-supplied id would let a caller act as any SI user. Token verification inside the SDK (`si.auth.introspect`, audience-checked) arrives in v2 with SI-375.
 
 ## Org-isolation model in app terms
 
@@ -300,7 +304,7 @@ type ResolvedOrganization = Membership['organizations'][number];
 
 ```ts
 interface ScopeToolCallInput {
-  userId: number | string;          // SI user id (Supreme JWT sub)
+  userId: number | string;          // SI user id of the VERIFIED caller (token sub), never request input
   principalId?: string;             // default String(userId)
   clientId: string;                 // OAuth client id / MCP client: keeps ChatGPT and Claude apart
   conversationKey: string | null;   // from conversationKey(); null → soft mode

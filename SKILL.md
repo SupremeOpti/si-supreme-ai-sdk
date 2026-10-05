@@ -222,6 +222,7 @@ Use it when the app's **server** must ask SI "can user X use this app in org Y r
 - **Every org-scoped MCP tool** takes an `organization` argument (slug preferred), calls `si.mcp.scopeToolCall({ userId, clientId, conversationKey, organization, tool, kind })`, scopes its queries with `scope.organization.id`, returns `si.mcp.labelResult(result, scope)`, and on error returns `si.mcp.errorResult(err)`. Annotate tools with `annotations.read` / `.write` / `.destructive`. Expose `si.mcp.listOrganizationsTool()`.
 - **Do not** add a server-side "current org" / `select_instance` tool, and never key anything on `Mcp-Session-Id` (Claude shares one session across conversations; MCP `2026-07-28` removes sessions). Use `si.mcp.conversationKey(...)`.
 - **Production lock store:** pass `locks: supabaseLockStore(serviceRoleClient)` and apply the SQL from docs/SERVER.md (or `SUPABASE_LOCK_STORE_SQL`). `memoryLockStore()` is for tests.
+- **`userId` is trusted.** Pass the SI user id from the token the server verified, never from tool arguments or headers. v1 does not verify tokens itself.
 - **It fails closed.** Errors are thrown, not returned. `UserGoneError` (`user_not_found`) means revoke the user's connection.
 - Audit forwarding to SI (`auditForwarding: { enabled: true }`) stays **off** until SI announces the endpoint is live.
 

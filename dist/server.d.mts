@@ -282,7 +282,11 @@ declare const annotations: Readonly<{
     destructive: McpToolAnnotations;
 }>;
 interface ScopeToolCallInput {
-    /** SI user id (the Supreme JWT `sub` captured at consent). */
+    /**
+     * SI user id of the **authenticated** caller: the `sub` of the token your
+     * server verified. Never take it from tool arguments or other request
+     * input; the SDK trusts it as the identity to check.
+     */
     userId: number | string;
     /** The app's principal id for lock/detection/audit keys. Default `String(userId)`. */
     principalId?: string;
@@ -327,7 +331,7 @@ interface ListOrganizationsTool {
         };
         annotations: McpToolAnnotations;
     };
-    /** Lists the user's orgs for this app, same shape as SI's `list_organizations`. */
+    /** Lists the user's orgs for this app, same shape as SI's `list_organizations`. `userId` must be the verified caller. */
     handler(input: {
         userId: number | string;
     }): Promise<McpToolResult>;
