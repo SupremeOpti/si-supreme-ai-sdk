@@ -121,8 +121,8 @@ export function orgBanner(org: { slug: string; name: string }): string {
  * **Do not set `structuredContent` on results served to Claude.** When a
  * result has `structuredContent`, Claude passes only that object to the model
  * and drops the text blocks, so the model loses the banner, the warning and
- * any text data. This helper never creates or modifies `structuredContent`;
- * one the caller set is passed through unchanged (the org is not added to it).
+ * any text data. This helper never creates or modifies `structuredContent`.
+ * If the caller sets one, it is passed through unchanged (the org is not added to it).
  */
 export function labelResult(result: McpToolResult, scope: Pick<ToolScope, 'organization' | 'warning'>): McpToolResult {
   const label: McpContentBlock[] = [{ type: 'text', text: orgBanner(scope.organization) }];

@@ -249,7 +249,7 @@ Error result (`si.mcp.errorResult(err)`) for a locked conversation:
 When a tool result carries `structuredContent`, Claude passes **only** that object to the model and drops the `content` text blocks. A result labelled with `structuredContent.organization` would reach the model as `{ organization }`: no data, no banner, no warning. SI's own MCP dropped `structuredContent` for the same reason.
 
 - Tools served to Claude **should not** set `structuredContent`. Put the data in text blocks (JSON text is fine).
-- `labelResult` never creates or edits `structuredContent`. One the tool set is passed through unchanged, without the org, so the model would not see the banner.
+- `labelResult` never creates or edits `structuredContent`. If the caller sets `structuredContent`, it is passed through unchanged, without the org, so the model would not see the banner.
 - `errorResult` and `listOrganizationsTool` return text only. The stable error `code` is in the text: `Error (<code>): <message>`.
 
 ---
