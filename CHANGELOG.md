@@ -16,8 +16,8 @@ Changes:
 
 - `labelResult` returns `content: [banner, warning?, ...result.content]`
   (banner and warning are their own text blocks). It never creates or edits
-  `structuredContent`; one the caller set passes through unchanged, without
-  `organization`. Tools served to Claude should not set it.
+  `structuredContent`. If the caller sets one, it passes through unchanged,
+  without `organization`. Tools served to Claude should not set it.
 - `errorResult` returns `isError: true` and one text block
   `Error (<code>): <message>`. No `structuredContent.error`; the stable code
   is in the text.
