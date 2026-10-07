@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.2.0 — 2026-10-05
+
+Adds the server-only entry `@supreme-ai/si-sdk/server` (SI-378). Not a
+security fix. The browser entry (`@supreme-ai/si-sdk`) is unchanged.
+
+### New: `@supreme-ai/si-sdk/server`
+
+- `createSiServerClient({ baseUrl, membershipKey, ... })` for app MCP
+  servers and APIs. Zero runtime dependencies; only `fetch`, Web Crypto,
+  `URL`. Runs on Node 18+, Next.js (Node and Edge), Supabase edge functions
+  (Deno, imported by URL pinned to a commit SHA) and Workers.
+- **Membership** wraps SI's `GET /api/membership/users/{user}/organizations`
+  (SI-374). Fails closed on network error, timeout, 5xx, `429` without a
+  fresh cached answer, malformed body, `401`, `403 app_inactive`,
+  `500 misconfigured_key`. `404 user_not_found` → `UserGoneError`. Cache caps:
+  allow ≤ 300 s, deny ≤ 30 s (callers may lower, never raise).
+- **Org resolution** by slug or id; **conversation-key lock**
+  (`_meta["openai/session"]` → Codex header → `X-SI-Conversation`; never
+  `Mcp-Session-Id`) with `memoryLockStore` and a `supabaseLockStore`
+  reference adapter (SQL in `docs/SERVER.md`, verified on Postgres 16);
+  **cross-org detection** (read A then write B within 15 min → warning, never
+  blocks).
+- **MCP helpers:** `scopeToolCall`, `labelResult` (structured org + banner),
+  `annotations` presets, `listOrganizationsTool`, `errorResult` with stable
+  error codes.
+- **Audit:** `onAudit` hook; forwarding to SI
+  (`POST /api/membership/audit-events`) is opt-in and **off by default**:
+  available once SI enables the endpoint (SI-379).
+
+### Packaging
+
+- `exports["./server"]` (`import` / `require` / types), with `deno`,
+  `workerd`, `worker` and `edge-light` conditions on the real build and a
+  `browser` condition on a stub that throws "server-only".
+- Server entry built against `tsconfig.server.json` (ES2022 lib, no DOM or
+  Node types). New `npm run typecheck:server`.
+- First test suite (`npm test`, jest).
+
+See [docs/SERVER.md](docs/SERVER.md).
+
 ## 1.1.0 — 2026-07-03
 
 Auth-traffic and session-continuity release. Fully backward compatible — no

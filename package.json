@@ -1,6 +1,6 @@
 {
   "name": "@supreme-ai/si-sdk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "TypeScript SDK for Supreme AI - Credit System and Personas Management - Supports both embedded (iframe) and standalone modes",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -15,6 +15,40 @@
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
       }
+    },
+    "./server": {
+      "deno": {
+        "types": "./dist/server.d.mts",
+        "default": "./dist/server.mjs"
+      },
+      "workerd": {
+        "types": "./dist/server.d.mts",
+        "default": "./dist/server.mjs"
+      },
+      "worker": {
+        "types": "./dist/server.d.mts",
+        "default": "./dist/server.mjs"
+      },
+      "edge-light": {
+        "types": "./dist/server.d.mts",
+        "default": "./dist/server.mjs"
+      },
+      "browser": "./dist/server-browser-stub.mjs",
+      "import": {
+        "types": "./dist/server.d.mts",
+        "default": "./dist/server.mjs"
+      },
+      "require": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      }
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "server": [
+        "dist/server.d.ts"
+      ]
     }
   },
   "files": [
@@ -23,12 +57,13 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --clean --external react --external react-dom",
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean --external react --external react-dom && tsup --config tsup.server.config.ts",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external react --external react-dom",
     "lint": "eslint . --ext .ts",
     "test": "jest",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "typecheck:server": "tsc -p tsconfig.server.json"
   },
   "keywords": [
     "supreme-ai",
