@@ -170,26 +170,40 @@ describe('scopeToolCall', () => {
 describe('labelResult', () => {
   const scope = { organization: { id: 2, slug: 'kadiko', name: 'Kadiko' }, warning: null };
 
-  it('prefixes the first text block with the banner and adds structured org', () => {
-    const input = { content: [{ type: 'image', data: 'x' }, { type: 'text', text: 'hello' }], structuredContent: { items: [1] } };
+  it('puts the banner first, keeps the original blocks after it, adds no structuredContent', () => {
+    const input = { content: [{ type: 'image', data: 'x' }, { type: 'text', text: 'hello' }] };
     const out = labelResult(input, scope);
-    expect(out.content[1]).toEqual({ type: 'text', text: '[Org: Kadiko (kadiko)]\nhello' });
-    expect(out.content[0]).toEqual({ type: 'image', data: 'x' });
-    expect(out.structuredContent).toEqual({ items: [1], organization: { id: 2, slug: 'kadiko', name: 'Kadiko' } });
+    expect(out.content).toEqual([
+      { type: 'text', text: '[Org: Kadiko (kadiko)]' },
+      { type: 'image', data: 'x' },
+      { type: 'text', text: 'hello' },
+    ]);
+    expect('structuredContent' in out).toBe(false);
     // input untouched
-    expect(input.content[1]).toEqual({ type: 'text', text: 'hello' });
-    expect(input.structuredContent).toEqual({ items: [1] });
+    expect(input.content).toEqual([{ type: 'image', data: 'x' }, { type: 'text', text: 'hello' }]);
   });
 
-  it('adds the warning line after the banner', () => {
+  it('passes caller-provided structuredContent through untouched', () => {
+    const structured = { items: [1] };
+    const out = labelResult({ content: [{ type: 'text', text: 'hello' }], structuredContent: structured }, scope);
+    expect(out.structuredContent).toEqual({ items: [1] });
+    expect(out.structuredContent).not.toHaveProperty('organization');
+    expect(structured).toEqual({ items: [1] });
+  });
+
+  it('adds the warning as its own block after the banner', () => {
     const out = labelResult({ content: [{ type: 'text', text: 'done' }] }, { ...scope, warning: 'Warning: x' });
-    expect(out.content[0].text).toBe('[Org: Kadiko (kadiko)]\nWarning: x\ndone');
+    expect(out.content).toEqual([
+      { type: 'text', text: '[Org: Kadiko (kadiko)]' },
+      { type: 'text', text: 'Warning: x' },
+      { type: 'text', text: 'done' },
+    ]);
   });
 
-  it('inserts a text block when there is none', () => {
+  it('labels an empty result with the banner alone', () => {
     const out = labelResult({ content: [] }, scope);
     expect(out.content).toEqual([{ type: 'text', text: '[Org: Kadiko (kadiko)]' }]);
-    expect(out.structuredContent).toEqual({ organization: { id: 2, slug: 'kadiko', name: 'Kadiko' } });
+    expect('structuredContent' in out).toBe(false);
   });
 
   it('keeps unknown result fields', () => {
@@ -215,16 +229,17 @@ describe('errorResult', () => {
   it.each(cases)('%s → %s', (err, code) => {
     const r = errorResult(err);
     expect(r.isError).toBe(true);
-    expect((r.structuredContent!.error as { code: string }).code).toBe(code);
+    expect('structuredContent' in r).toBe(false);
+    expect(r.content).toHaveLength(1);
     expect(r.content[0].text).toMatch(new RegExp(`^Error \\(${code}\\): `));
     // operator detail never leaks
     expect(JSON.stringify(r)).not.toContain('hunter2');
     expect(JSON.stringify(r)).not.toContain('HTTP');
   });
 
-  it('org_locked carries both orgs', () => {
-    const r = errorResult(new OrgLockedError({ id: 2, slug: 'kadiko', name: 'Kadiko' }, { id: 29 }));
-    expect(r.structuredContent!.error).toMatchObject({ locked_organization: { id: 2, slug: 'kadiko' }, requested_organization: { id: 29 } });
+  it('org_locked names the locked org in the text', () => {
+    const r = errorResult(new OrgLockedError({ id: 2, slug: 'kadiko', name: 'Kadiko' }, { id: 29, slug: 'sg', name: 'SG' }));
+    expect(r.content[0].text).toContain('Kadiko (kadiko)');
   });
 
   it('every scopeToolCall failure maps to a stable code', async () => {
@@ -239,7 +254,7 @@ describe('errorResult', () => {
     for (const [replies, over, code] of failures) {
       const { si } = setup(replies);
       const err = await si.mcp.scopeToolCall(call(over)).catch((e) => e);
-      expect((si.mcp.errorResult(err).structuredContent!.error as { code: string }).code).toBe(code);
+      expect(si.mcp.errorResult(err).content[0].text).toMatch(new RegExp(`^Error \\(${code}\\): `));
     }
   });
 });
@@ -271,7 +286,8 @@ describe('listOrganizationsTool', () => {
       ],
       meta: { count: 2 },
     };
-    expect(result.structuredContent).toEqual(expected);
+    expect('structuredContent' in result).toBe(false);
+    expect(result.content).toHaveLength(1);
     expect(JSON.parse(result.content[0].text!)).toEqual(expected);
   });
 
@@ -279,7 +295,8 @@ describe('listOrganizationsTool', () => {
     const { si } = setup([{ status: 500 }]);
     const result = await si.mcp.listOrganizationsTool().handler({ userId: 456 });
     expect(result.isError).toBe(true);
-    expect((result.structuredContent!.error as { code: string }).code).toBe('si_unavailable');
+    expect('structuredContent' in result).toBe(false);
+    expect(result.content[0].text).toMatch(/^Error \(si_unavailable\): /);
   });
 });
 

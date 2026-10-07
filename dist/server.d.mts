@@ -153,7 +153,7 @@ interface SiServerConfig {
     now?: () => number;
 }
 
-declare const SERVER_SDK_VERSION = "1.2.0";
+declare const SERVER_SDK_VERSION = "1.2.1";
 
 declare const AUDIT_EVENTS_PATH = "/api/membership/audit-events";
 interface AuditApi {
@@ -350,14 +350,23 @@ declare function orgBanner(org: {
     name: string;
 }): string;
 /**
- * Label a tool result with its org: `structuredContent.organization` plus a
- * banner (and the detection warning, if any) as the first lines of the first
+ * Label a tool result with its org: returns `content` as
+ * `[banner, warning?, ...result.content]`, where the banner is a text block
+ * `[Org: Name (slug)]` and the cross-org detection warning (if any) is its own
  * text block. Returns a new object; the input is not mutated.
+ *
+ * **Do not set `structuredContent` on results served to Claude.** When a
+ * result has `structuredContent`, Claude passes only that object to the model
+ * and drops the text blocks, so the model loses the banner, the warning and
+ * any text data. This helper never creates or modifies `structuredContent`.
+ * If the caller sets one, it is passed through unchanged (the org is not added to it).
  */
 declare function labelResult(result: McpToolResult, scope: Pick<ToolScope, 'organization' | 'warning'>): McpToolResult;
 /**
- * Standard MCP error result. SDK errors keep their stable `code` and public
- * message; anything else becomes `internal_error` without leaking detail.
+ * Standard MCP error result: `isError: true` and one text block
+ * `Error (<code>): <message>`, no `structuredContent` (Claude would show the
+ * model only that). SDK errors keep their stable `code` and public message;
+ * anything else becomes `internal_error` without leaking detail.
  */
 declare function errorResult(err: unknown): McpToolResult;
 
