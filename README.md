@@ -890,7 +890,7 @@ try {
 | Org resolution | `organization` argument as slug or numeric id; unknown and not-allowed both → `OrgAccessDeniedError`. |
 | Conversation key | `_meta["openai/session"]` → Codex conversation header → `X-SI-Conversation` → `null`. Never `Mcp-Session-Id`. |
 | Lock | With a key: first org binds `(principal, client, sha256(key))` for a sliding 24 h, another org → `OrgLockedError`. No key → soft mode. |
-| Label | `structuredContent.organization` + `[Org: Name (slug)]` banner line (+ detection warning). |
+| Label | `[Org: Name (slug)]` banner block first (+ detection warning block), then the tool's blocks. Text only: don't set `structuredContent` for Claude ([why](docs/SERVER.md#no-structuredcontent-for-claude)). |
 | Detection | Read org A then write org B within 15 min (same principal + client) → warning on the write. Never blocks. |
 | Audit | `onAudit(event)` hook on every call. Forwarding to SI (`auditForwarding: { enabled: true }`) is opt-in, default off: available once SI enables the endpoint (SI-379). |
 
@@ -1013,6 +1013,10 @@ MIT
 ## Changelog
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-10-07
+
+- Fix (1.2.1, SI-378), matters for Claude clients: `labelResult`, `errorResult` and `listOrganizationsTool` no longer emit `structuredContent` (Claude shows the model only `structuredContent` when present, so labelled results lost their data and banner). `labelResult` now returns `[banner, warning?, ...content]` and passes a caller-set `structuredContent` through unchanged; `errorResult` is text-only `Error (<code>): <message>`. [mcp.ts](src/server/mcp.ts), [docs/SERVER.md](docs/SERVER.md#no-structuredcontent-for-claude), [CHANGELOG.md](CHANGELOG.md).
 
 ### 2026-10-05
 

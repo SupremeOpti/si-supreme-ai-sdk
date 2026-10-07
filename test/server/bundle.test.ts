@@ -35,7 +35,7 @@ describe('dist/server.mjs', () => {
       ['--input-type=module', '-e', "const m = await import('./dist/server.mjs'); console.log(typeof m.createSiServerClient, m.SERVER_SDK_VERSION)"],
       { cwd: root, encoding: 'utf8' }
     );
-    expect(out.trim()).toBe('function 1.2.0');
+    expect(out.trim()).toBe('function 1.2.1');
   });
 
   it('CJS build loads too', () => {

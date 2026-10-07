@@ -113,42 +113,34 @@ export function orgBanner(org: { slug: string; name: string }): string {
 }
 
 /**
- * Label a tool result with its org: `structuredContent.organization` plus a
- * banner (and the detection warning, if any) as the first lines of the first
+ * Label a tool result with its org: returns `content` as
+ * `[banner, warning?, ...result.content]`, where the banner is a text block
+ * `[Org: Name (slug)]` and the cross-org detection warning (if any) is its own
  * text block. Returns a new object; the input is not mutated.
+ *
+ * **Do not set `structuredContent` on results served to Claude.** When a
+ * result has `structuredContent`, Claude passes only that object to the model
+ * and drops the text blocks, so the model loses the banner, the warning and
+ * any text data. This helper never creates or modifies `structuredContent`;
+ * one the caller set is passed through unchanged (the org is not added to it).
  */
 export function labelResult(result: McpToolResult, scope: Pick<ToolScope, 'organization' | 'warning'>): McpToolResult {
-  const org = { id: scope.organization.id, slug: scope.organization.slug, name: scope.organization.name };
-  const prefix = [orgBanner(org), ...(scope.warning ? [scope.warning] : [])].join('\n');
+  const label: McpContentBlock[] = [{ type: 'text', text: orgBanner(scope.organization) }];
+  if (scope.warning) label.push({ type: 'text', text: scope.warning });
   const content = Array.isArray(result.content) ? result.content.map((b) => ({ ...b })) : [];
-  const idx = content.findIndex((b) => b.type === 'text' && typeof b.text === 'string');
-  if (idx >= 0) content[idx] = { ...content[idx], text: content[idx].text ? `${prefix}\n${content[idx].text}` : prefix };
-  else content.unshift({ type: 'text', text: prefix });
-
-  return {
-    ...result,
-    content,
-    structuredContent: { ...(result.structuredContent ?? {}), organization: org },
-  };
+  return { ...result, content: [...label, ...content] };
 }
 
 /**
- * Standard MCP error result. SDK errors keep their stable `code` and public
- * message; anything else becomes `internal_error` without leaking detail.
+ * Standard MCP error result: `isError: true` and one text block
+ * `Error (<code>): <message>`, no `structuredContent` (Claude would show the
+ * model only that). SDK errors keep their stable `code` and public message;
+ * anything else becomes `internal_error` without leaking detail.
  */
 export function errorResult(err: unknown): McpToolResult {
   const code: SiServerErrorCode | 'internal_error' = isSiServerError(err) ? err.code : 'internal_error';
   const message = isSiServerError(err) ? err.publicMessage : 'The tool failed unexpectedly. Try again in a moment.';
-  const error: Record<string, unknown> = { code, message };
-  if (err instanceof OrgLockedError) {
-    error.locked_organization = err.lockedOrganization;
-    error.requested_organization = err.requestedOrganization;
-  }
-  return {
-    isError: true,
-    content: [{ type: 'text', text: `Error (${code}): ${message}` }],
-    structuredContent: { error },
-  };
+  return { isError: true, content: [{ type: 'text', text: `Error (${code}): ${message}` }] };
 }
 
 export function createMcp(deps: McpDeps): McpApi {
@@ -250,7 +242,7 @@ export function createMcp(deps: McpDeps): McpApi {
           })),
           meta: { count: m.organizations.length },
         };
-        return { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload };
+        return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
       } catch (err) {
         return errorResult(err);
       }

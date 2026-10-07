@@ -282,7 +282,7 @@ function isSiServerError(err) {
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.2.0";
+var SERVER_SDK_VERSION = "1.2.1";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
@@ -637,32 +637,15 @@ function orgBanner(org) {
   return `[Org: ${org.name} (${org.slug})]`;
 }
 function labelResult(result, scope) {
-  const org = { id: scope.organization.id, slug: scope.organization.slug, name: scope.organization.name };
-  const prefix = [orgBanner(org), ...scope.warning ? [scope.warning] : []].join("\n");
+  const label = [{ type: "text", text: orgBanner(scope.organization) }];
+  if (scope.warning) label.push({ type: "text", text: scope.warning });
   const content = Array.isArray(result.content) ? result.content.map((b) => ({ ...b })) : [];
-  const idx = content.findIndex((b) => b.type === "text" && typeof b.text === "string");
-  if (idx >= 0) content[idx] = { ...content[idx], text: content[idx].text ? `${prefix}
-${content[idx].text}` : prefix };
-  else content.unshift({ type: "text", text: prefix });
-  return {
-    ...result,
-    content,
-    structuredContent: { ...result.structuredContent ?? {}, organization: org }
-  };
+  return { ...result, content: [...label, ...content] };
 }
 function errorResult(err) {
   const code = isSiServerError(err) ? err.code : "internal_error";
   const message = isSiServerError(err) ? err.publicMessage : "The tool failed unexpectedly. Try again in a moment.";
-  const error = { code, message };
-  if (err instanceof OrgLockedError) {
-    error.locked_organization = err.lockedOrganization;
-    error.requested_organization = err.requestedOrganization;
-  }
-  return {
-    isError: true,
-    content: [{ type: "text", text: `Error (${code}): ${message}` }],
-    structuredContent: { error }
-  };
+  return { isError: true, content: [{ type: "text", text: `Error (${code}): ${message}` }] };
 }
 function createMcp(deps) {
   const scopeToolCall = async (input) => {
@@ -752,7 +735,7 @@ function createMcp(deps) {
           })),
           meta: { count: m.organizations.length }
         };
-        return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+        return { content: [{ type: "text", text: JSON.stringify(payload) }] };
       } catch (err) {
         return errorResult(err);
       }

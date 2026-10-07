@@ -112,7 +112,7 @@ SI's model (`mcp-org-session-isolation-plan.md`, rev 3) applies to every app MCP
 1. **Explicit org on every org-scoped tool.** Add an `organization` argument that takes the org **slug** (preferred: a human approving the call can read it) or the numeric id as a string. No server-side "current org", no `select_instance`.
 2. **Membership on every call.** `scopeToolCall` resolves the argument against SI's live membership answer (cached ≤ 5 min, denials ≤ 30 s). Unknown and not-allowed orgs get the same `org_access_denied` error.
 3. **Conversation-key lock where the client sends a key.** `conversationKey()` tries `_meta["openai/session"]` (ChatGPT) → Codex conversation header → `X-SI-Conversation` (Claude Code via `headersHelper`, SI's own agents) → `null`. With a key, the first org-scoped call binds `(principal, client, sha256(key))` to that org and another org is refused (`org_locked`: "Start a new conversation to work in X"). Without a key (Claude.ai / Desktop / mobile send none) the call runs in **soft mode**: no lock. The key guards against model confusion; it is never an authorization input. **Nothing uses `Mcp-Session-Id`**: Claude shares one MCP session across every conversation, and MCP `2026-07-28` removes sessions.
-4. **Org on every result.** `labelResult` adds `structuredContent.organization = { id, slug, name }` and a banner `[Org: Kadiko (kadiko)]` as the first text line.
+4. **Org on every result.** `labelResult` puts a banner text block `[Org: Kadiko (kadiko)]` first (and the detection warning, if any, as the second block), before the tool's own blocks. Results are text-only: see [No `structuredContent` for Claude](#no-structuredcontent-for-claude).
 5. **Human-visible writes.** Annotate tools with `annotations.read` / `.write` / `.destructive` so clients auto-run reads and prompt before writes. Write tools take the slug, so the approval prompt shows the org.
 6. **Detect, never block.** When the same principal + client read org A and then write org B within 15 min, the write still runs and its result carries a warning line. With audit forwarding on, SI runs the same detection across all apps.
 7. **The app's own duties** (the SDK can't do these): resolve every id the tool receives to its owning org and refuse a mismatch with the checked org; make derive/copy tools take references only; scope every query with `scope.organization.id` (never the raw argument) in the data layer.
@@ -201,7 +201,7 @@ export async function callTool(
       await admin.from('canvases').update({ title: params.arguments.title }).eq('id', canvas.id);
 
       return si.mcp.labelResult(
-        { content: [{ type: 'text', text: `Renamed canvas ${canvas.id}.` }], structuredContent: { canvas_id: canvas.id } },
+        { content: [{ type: 'text', text: `Renamed canvas ${canvas.id}.` }] },
         scope,
       );
     } catch (err) {
@@ -220,15 +220,13 @@ Result of a write right after reading another org in soft mode:
 ```json
 {
   "content": [
+    { "type": "text", "text": "[Org: Supreme Group (supreme-group)]" },
     {
       "type": "text",
-      "text": "[Org: Supreme Group (supreme-group)]\nWarning: this connection read Kadiko (kadiko) 4 min ago. Confirm nothing from Kadiko is in this write to Supreme Group (supreme-group).\nRenamed canvas 81."
-    }
-  ],
-  "structuredContent": {
-    "canvas_id": 81,
-    "organization": { "id": 29, "slug": "supreme-group", "name": "Supreme Group" }
-  }
+      "text": "Warning: this connection read Kadiko (kadiko) 4 min ago. Confirm nothing from Kadiko is in this write to Supreme Group (supreme-group)."
+    },
+    { "type": "text", "text": "Renamed canvas 81." }
+  ]
 }
 ```
 
@@ -242,17 +240,17 @@ Error result (`si.mcp.errorResult(err)`) for a locked conversation:
       "type": "text",
       "text": "Error (org_locked): This conversation is already working in Kadiko (kadiko). Start a new conversation to work in Supreme Group (supreme-group)."
     }
-  ],
-  "structuredContent": {
-    "error": {
-      "code": "org_locked",
-      "message": "This conversation is already working in Kadiko (kadiko). Start a new conversation to work in Supreme Group (supreme-group).",
-      "locked_organization": { "id": 2, "slug": "kadiko", "name": "Kadiko" },
-      "requested_organization": { "id": 29, "slug": "supreme-group", "name": "Supreme Group" }
-    }
-  }
+  ]
 }
 ```
+
+### No `structuredContent` for Claude
+
+When a tool result carries `structuredContent`, Claude passes **only** that object to the model and drops the `content` text blocks. A result labelled with `structuredContent.organization` would reach the model as `{ organization }`: no data, no banner, no warning. SI's own MCP dropped `structuredContent` for the same reason.
+
+- Tools served to Claude **should not** set `structuredContent`. Put the data in text blocks (JSON text is fine).
+- `labelResult` never creates or edits `structuredContent`. One the tool set is passed through unchanged, without the org, so the model would not see the banner.
+- `errorResult` and `listOrganizationsTool` return text only. The stable error `code` is in the text: `Error (<code>): <message>`.
 
 ---
 
@@ -297,9 +295,9 @@ type ResolvedOrganization = Membership['organizations'][number];
 |---|---|---|
 | `conversationKey({ headers, meta })` | `string \| null` | `meta` is the tool call's `params._meta`; `headers` is a Fetch `Headers` or a plain object. Values over 512 chars are ignored. |
 | `scopeToolCall(input)` | `ToolScope` | Org resolution + membership + lock (or soft mode) + detection + audit, in that order. |
-| `labelResult(result, scope)` | `McpToolResult` | New object; input not mutated. |
-| `errorResult(err)` | `McpToolResult` | `isError: true`, stable `code`, public message only. Unknown errors → `internal_error` with a generic message. |
-| `listOrganizationsTool()` | `{ definition, handler }` | Read-only tool. `handler({ userId })` returns `{ data: [{ organization_id, slug, name, roles, app_grant }], meta: { count } }` as JSON text and `structuredContent`. Errors come back as `errorResult`. |
+| `labelResult(result, scope)` | `McpToolResult` | `content` = `[banner, warning?, ...result.content]`. New object; input not mutated. Never adds `structuredContent`; a caller-set one passes through unchanged (don't set one for Claude). |
+| `errorResult(err)` | `McpToolResult` | `isError: true`, one text block `Error (<code>): <message>`, no `structuredContent`. Public message only. Unknown errors → `internal_error` with a generic message. |
+| `listOrganizationsTool()` | `{ definition, handler }` | Read-only tool. `handler({ userId })` returns `{ data: [{ organization_id, slug, name, roles, app_grant }], meta: { count } }` as JSON text only (no `structuredContent`). Errors come back as `errorResult`. |
 | `annotations` | presets | Same object as the top-level `annotations` export. |
 
 ```ts

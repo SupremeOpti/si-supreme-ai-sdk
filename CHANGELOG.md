@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.2.1 — 2026-10-07
+
+Fix for Claude clients (SI-378). When a tool result has
+`structuredContent`, Claude passes only that object to the model and drops
+the text blocks. In 1.2.0 the MCP helpers set it, so on Claude:
+
+- `labelResult` results reached the model as `{ organization }` only: no
+  data, no `[Org: ...]` banner, no detection warning.
+- `errorResult` results reached the model as the error object, not the
+  human-readable message.
+- `listOrganizationsTool` sent its payload twice (text and structured).
+
+Changes:
+
+- `labelResult` returns `content: [banner, warning?, ...result.content]`
+  (banner and warning are their own text blocks). It never creates or edits
+  `structuredContent`; one the caller set passes through unchanged, without
+  `organization`. Tools served to Claude should not set it.
+- `errorResult` returns `isError: true` and one text block
+  `Error (<code>): <message>`. No `structuredContent.error`; the stable code
+  is in the text.
+- `listOrganizationsTool` returns JSON text only.
+
+Breaking only for callers that read `structuredContent.organization` or
+`structuredContent.error` from these helpers. Docs: `docs/SERVER.md`
+(No `structuredContent` for Claude).
+
 ## 1.2.0 — 2026-10-05
 
 Adds the server-only entry `@supreme-ai/si-sdk/server` (SI-378). Not a
