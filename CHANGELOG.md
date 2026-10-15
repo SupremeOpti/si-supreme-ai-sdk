@@ -1,5 +1,68 @@
 # Changelog
 
+## 1.3.0 — 2026-10-15
+
+Token introspection and grant status for `@supreme-ai/si-sdk/server`
+(SI-378 v2, for SI-375 / SI-417), built against SI's
+`POST /api/oauth/introspect` and `POST /api/oauth/grants/status` (SI-411).
+Additive: no existing signature or behaviour changes. Not a security fix.
+The browser entry is unchanged (`dist/index.*` byte-identical).
+
+### New: `si.auth`
+
+- `introspect(bearer, { resource? })` returns a frozen, typed
+  `IntrospectionPrincipal` (`sub`, `aud`, `scope[]`, `clientId`,
+  `clientName`, `grantId`, `requestedResource`, `isSuperadmin`,
+  `organizations`, `exp`, `iat`, `iss`, optional `email` / `name`).
+  **Fails closed:** `active: false` → `InvalidTokenError` (`inactive`);
+  `aud` ≠ the configured canonical resource → `audience_mismatch`; past
+  `exp` by the local clock → `expired`; no token → `missing`. Network
+  error, timeout, 5xx, malformed body → `SiUnavailableError`.
+- **Cache:** `active: true` only, ≤ 60 s and never past `exp`, keyed by
+  SHA-256 of the token. `active: false`, errors and aud mismatches are
+  never cached. A separate in-process `memoryCache()` by default (principals
+  carry email; a shared store would cost about what it saves);
+  `auth.cache` overrides.
+- `grantStatus(grantIds)`: `{ [id]: 'active' | 'revoked' | 'expired' | 'unknown' }`,
+  deduped, chunked by 100, no partial answers. Optional `active`-only cache
+  (`auth.grantStatusTtlSeconds`, default off, max 60 s).
+- `requireScope(principal, scopes)` → `InsufficientScopeError` carrying
+  every required scope; `challenge(err, { requestUrl })` builds the
+  `401` (`resource_metadata`, `invalid_token`) / `403`
+  (`insufficient_scope`, `scope="…"`) answers, and `503` + `Retry-After`
+  when SI can't answer.
+- `protectedResourceMetadata(requestUrl)` for
+  `/.well-known/oauth-protected-resource` (root and path-suffixed):
+  `authorization_servers: [issuer]`, `resource` echoes the client's query
+  (`?instance=…`) on the configured origin and path.
+  `resourceMetadataUrl(requestUrl)` gives the path-suffixed URL.
+- Error mapping: `401` / `500 misconfigured_key` → `MisconfiguredKeyError`,
+  `403 app_inactive` → `AppInactiveError`, `422` → `SiValidationError`
+  (new), `429` → `SiUnavailableError` (`rate_limited`) with the new
+  `retryAfterSeconds`; after a `429` the client stops calling SI until
+  `Retry-After` passes (cap 60 s), still serving cached answers.
+
+### Changed (additive)
+
+- `scopeToolCall`, `organizations.resolve` and
+  `listOrganizationsTool().handler` accept the introspection `principal`:
+  the org is resolved from its `organizations`, with no membership call.
+  Only principals created by `introspect` are accepted. Rev-3 behaviour is
+  unchanged (explicit `organization`, banner, no `structuredContent`,
+  conversation-key lock only with a key). `userId` / `clientId` became
+  optional in `ScopeToolCallInput` (required when no principal is passed).
+- `SiUnavailableError.message` says "SI check unavailable" (was "SI
+  membership check unavailable"); membership `429` errors now carry
+  `retryAfterSeconds` too.
+- New config `auth`, new exports `requireScope`, `bearerChallenge`,
+  `bearerToken`, `canonicalResourceUri`, `isVerifiedPrincipal`, the
+  `InvalidTokenError` / `InsufficientScopeError` / `SiValidationError`
+  classes and constants.
+- `X-SI-Min-Server-SDK` is checked on the new endpoints as on membership.
+  SI doesn't send the header yet.
+
+Docs: `docs/SERVER.md` (Token introspection), README, `SKILL.md`.
+
 ## 1.2.1 — 2026-10-07
 
 Fix for Claude clients (SI-378). When a tool result has

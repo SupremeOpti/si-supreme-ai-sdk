@@ -1,6 +1,6 @@
 # `@supreme-ai/si-sdk/server`: shared server-side auth for app MCPs and APIs
 
-**Linear:** SI-378 (tracker SI-376). **Status:** planned 2026-10-02, not started. Branch `michael-supreme/server-entry`.
+**Linear:** SI-378 (tracker SI-376). **Status:** v1 shipped in 1.2.0 (2026-10-05), v2 shipped in 1.3.0 (2026-10-15). Branch `michael-supreme/server-entry`.
 **Related (supreme-intelligence-v2 `docs/plans/`):**
 - `sub-app-membership-endpoint-plan.md` (SI-374): the membership endpoint this wraps first
 - `mcp-org-session-isolation-plan.md` (rev 3): the org-isolation model these helpers implement (explicit org, conversation-key lock where available, human-visible writes, detection)
@@ -88,6 +88,15 @@ si.mcp.errorResult(err)          // standard MCP error content for the error cla
 - Token issuance or consent. SI does that (SI-375).
 
 ## Scope: v2 (ships with SI-375 phase B)
+
+**Status: shipped in 1.3.0 (2026-10-15)**, against SI-411 (live on SI main). Differences from the list below:
+- Everything lives on `si.auth`: `introspect`, `grantStatus`, `requireScope`, `challenge` (the
+  planned `si.mcp.unauthorized()`, also covering 403 `insufficient_scope` and 503),
+  `protectedResourceMetadata` (planned as `si.mcp.protectedResourceMetadata()`), `resourceMetadataUrl`.
+  Results are plain `{ status, headers, body }` objects, not `Response`s (runtime-neutral).
+- The introspection cache is in-process memory by default (`auth.cache` overrides); there is no
+  Supabase cache adapter. See `docs/SERVER.md` § Token introspection for why.
+- `X-SI-Min-Server-SDK`: the SDK checks it on every SI response, but SI doesn't send it yet.
 
 - `si.auth.introspect(bearer)`: wraps `POST /oauth/introspect`. Returns principal,
   audience, scopes, organizations. Cache `active:true` ≤ 60 s, never cache `active:false`.

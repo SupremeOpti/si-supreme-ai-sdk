@@ -1,12 +1,12 @@
 # `@supreme-ai/si-sdk/server`
 
-Server-side helpers for app MCP servers and APIs that trust Supreme Intelligence (SI) for identity, membership, roles and app grants. Since 1.2.0 (SI-378).
+Server-side helpers for app MCP servers and APIs that trust Supreme Intelligence (SI) for identity, membership, roles and app grants. Since 1.2.0 (SI-378); token introspection and grant status since 1.3.0.
 
 - **Server-only.** It holds the app's secret `membership_api` key. The browser entry (`@supreme-ai/si-sdk`) never re-exports it, and bundlers that resolve the `browser` export condition get a stub that throws `@supreme-ai/si-sdk/server is server-only`.
 - **Runtime-neutral.** Only `fetch`, Web Crypto, `URL`, `TextEncoder`, `AbortController`, `setTimeout`. Runs on Node 18+, Next.js route handlers / server actions (Node and Edge runtimes), Supabase edge functions (Deno) and Workers. No runtime dependencies.
 - **Fails closed.** Network error, timeout, 5xx, `429` without a fresh cached answer, malformed body, rejected or misconfigured key, inactive app: every one is a deny (a thrown error). No code path returns "allowed" without a successful SI answer.
 
-Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#identity-who-userid-is) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
+Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#identity-who-userid-is) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [Token introspection](#token-introspection-siauth) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
 
 ---
 
@@ -48,6 +48,7 @@ Use the SHA of a merged commit on `main` that contains the `dist/` you want. Bum
 |---|---|
 | `SI_MEMBERSHIP_KEY` | `membershipKey`. The app's `membership_api` key from SI (`php artisan apikey:generate --purpose=membership_api --app=<app>`). Server-side secret: never ship it to a browser or forward it to MCP clients. |
 | `SI_BASE_URL` (suggested name) | `baseUrl`, e.g. `https://app.supremegroup.ai`. |
+| `SI_MCP_RESOURCE` (suggested name) | `auth.resource`: the app's canonical MCP resource URI as registered in SI, e.g. `https://studio-canvas.supremegroup.ai/mcp`. Only for apps whose MCP server is an SI OAuth resource. |
 
 The SDK reads no environment variables itself; pass values in.
 
@@ -87,6 +88,17 @@ interface SiServerConfig {
     codexHeaders?: string[];       // default ['x-codex-conversation-id', 'x-codex-session-id']
     siHeader?: string;             // default 'x-si-conversation'
   };
+  auth?: {                         // si.auth (1.3.0), see Token introspection
+    resource?: string;             // canonical MCP resource URI; required for introspect (or pass per call)
+    issuer?: string;               // PRM authorization_servers[0], default baseUrl
+    cache?: CacheAdapter;          // default: a separate in-process memoryCache()
+    introspectionTtlSeconds?: number;  // active:true cache, default and max 60, never past exp
+    grantStatusTtlSeconds?: number;    // 'active' cache, default 0 (off), max 60
+    scopesSupported?: string[];    // PRM scopes_supported
+    resourceName?: string;         // PRM resource_name
+    resourceDocumentation?: string;// PRM resource_documentation
+    logoUri?: string;              // PRM logo_uri
+  };
   onAudit?: (event: AuditEvent) => void | Promise<void>;
   auditForwarding?: {
     enabled?: boolean;             // default false (see Audit forwarding)
@@ -103,14 +115,16 @@ TTLs above the caps are clamped down. `0` disables that cache.
 
 ## Identity: who `userId` is
 
-v1 does **not** authenticate the caller. `userId` (and `principalId`) passed to `scopeToolCall`, `listOrganizationsTool().handler`, `membership.*` and `organizations.resolve` is trusted as the identity to check. It **must** come from the token your server verified for this request (the Supreme JWT `sub` captured at consent, or your own session bound to it), never from tool arguments, query strings or headers the client controls. Passing a request-supplied id would let a caller act as any SI user. Token verification inside the SDK (`si.auth.introspect`, audience-checked) arrives in v2 with SI-375.
+**Apps on SI OAuth (1.3.0+):** pass the `principal` from [`si.auth.introspect`](#token-introspection-siauth) to `scopeToolCall` and `listOrganizationsTool().handler`. The SDK then takes the identity (`sub`) and the org list from SI's answer for the bearer itself, and rejects any principal object that `introspect` didn't create.
+
+**With `userId`:** the SDK does **not** authenticate the caller. `userId` (and `principalId`) passed to `scopeToolCall`, `listOrganizationsTool().handler`, `membership.*` and `organizations.resolve` is trusted as the identity to check. It **must** come from the token your server verified for this request (the Supreme JWT `sub` captured at consent, or your own session bound to it), never from tool arguments, query strings or headers the client controls. Passing a request-supplied id would let a caller act as any SI user.
 
 ## Org-isolation model in app terms
 
 SI's model (`mcp-org-session-isolation-plan.md`, rev 3) applies to every app MCP. The SDK implements the shared parts; the app wires them into every org-scoped tool.
 
 1. **Explicit org on every org-scoped tool.** Add an `organization` argument that takes the org **slug** (preferred: a human approving the call can read it) or the numeric id as a string. No server-side "current org", no `select_instance`.
-2. **Membership on every call.** `scopeToolCall` resolves the argument against SI's live membership answer (cached ≤ 5 min, denials ≤ 30 s). Unknown and not-allowed orgs get the same `org_access_denied` error.
+2. **Membership on every call.** `scopeToolCall` resolves the argument against SI's live membership answer (cached ≤ 5 min, denials ≤ 30 s), or, with a `principal`, against the introspection answer's `organizations` (cached ≤ 60 s). Unknown and not-allowed orgs get the same `org_access_denied` error.
 3. **Conversation-key lock where the client sends a key.** `conversationKey()` tries `_meta["openai/session"]` (ChatGPT) → Codex conversation header → `X-SI-Conversation` (Claude Code via `headersHelper`, SI's own agents) → `null`. With a key, the first org-scoped call binds `(principal, client, sha256(key))` to that org and another org is refused (`org_locked`: "Start a new conversation to work in X"). Without a key (Claude.ai / Desktop / mobile send none) the call runs in **soft mode**: no lock. The key guards against model confusion; it is never an authorization input. **Nothing uses `Mcp-Session-Id`**: Claude shares one MCP session across every conversation, and MCP `2026-07-28` removes sessions.
 4. **Org on every result.** `labelResult` puts a banner text block `[Org: Kadiko (kadiko)]` first (and the detection warning, if any, as the second block), before the tool's own blocks. Results are text-only: see [No `structuredContent` for Claude](#no-structuredcontent-for-claude).
 5. **Human-visible writes.** Annotate tools with `annotations.read` / `.write` / `.destructive` so clients auto-run reads and prompt before writes. Write tools take the slug, so the approval prompt shows the org.
@@ -254,6 +268,257 @@ When a tool result carries `structuredContent`, Claude passes **only** that obje
 
 ---
 
+## Token introspection (`si.auth`)
+
+Since 1.3.0 (SI-378 v2, for SI-375 / SI-411). For an app whose MCP server is an SI OAuth **resource**: SI is the authorization server, the app mints and stores no tokens. On every MCP request the app sends the client's bearer to SI (`POST /api/oauth/introspect`, RFC 7662) with its `membership_api` key and gets back who the user is, the grant, the scopes and the orgs the user may use the app in right now. The same key authenticates it; there is no separate introspection key.
+
+```ts
+const si = createSiServerClient({
+  baseUrl: 'https://app.supremegroup.ai',
+  membershipKey: Deno.env.get('SI_MEMBERSHIP_KEY')!,
+  locks: supabaseLockStore(admin),
+  auth: {
+    resource: 'https://studio-canvas.supremegroup.ai/mcp',   // mcp_resources.resource_uri, exactly
+    scopesSupported: ['mcp:canva:base', 'mcp:canva:storyboards', 'mcp:canva:runs'],
+    resourceName: 'Studio Canvas',
+  },
+});
+
+const principal = await si.auth.introspect(si.auth.bearerToken(req.headers));
+si.auth.requireScope(principal, 'mcp:canva:base');
+```
+
+### What `introspect` checks
+
+`introspect(bearer, { resource? })` returns an `IntrospectionPrincipal` or throws. It returns a principal only when **all** of these hold:
+
+1. SI answered `200` with `active: true` and a body matching the contract (`sub` an integer string, `aud`, `iss`, `client_id`, `scope`, `grant_id`, `requested_resource` strings, `exp` / `iat` integers, `is_superadmin` boolean, `organizations` of `{id, slug, name, roles, app_grant}`). `email` and `name` are optional.
+2. `aud` equals this app's canonical resource (`auth.resource`, or `{ resource }` per call), compared canonically (lowercase scheme and host, no default port, one trailing `/` stripped, query kept). SI already refuses tokens for other resources; this is defence in depth. A mismatch also logs a warning.
+3. `exp` is in the future by the local clock.
+
+| Outcome | Error | `reason` |
+|---|---|---|
+| No token, empty, or a bare `Bearer` | `InvalidTokenError` | `missing` (SI isn't called) |
+| SI `{"active": false}` (unknown, revoked, expired, refresh token, other resource, revoked grant, ...) | `InvalidTokenError` | `inactive` |
+| `aud` ≠ the configured resource | `InvalidTokenError` | `audience_mismatch` |
+| `exp` passed | `InvalidTokenError` | `expired` |
+| Network error, timeout (3 s), 5xx, malformed body, unexpected status | `SiUnavailableError` | `network`, `timeout`, `server_error`, `malformed_response`, `unexpected_status` |
+| `429` | `SiUnavailableError` | `rate_limited`, with `retryAfterSeconds` from `Retry-After` |
+| `401` (key rejected) / `500 misconfigured_key` (key has no app, or the app has no MCP resource) | `MisconfiguredKeyError` | `status` 401 / 500 |
+| `403 app_inactive` | `AppInactiveError` | |
+| `422 validation_failed` | `SiValidationError` | `errors` |
+
+There is no code path that returns a principal without SI's `active: true` for this resource. Network errors and 5xx get one retry (as for membership); `500 misconfigured_key`, `422` and `429` are never retried.
+
+**`429` and `Retry-After`.** SI allows 1200 requests per minute per key across introspection and grant status. After a `429` with `Retry-After`, the client stops calling SI for that long (capped at 60 s) and throws `rate_limited` immediately; answers already in the cache are still served. Return `503` with the same `Retry-After` to the MCP client (`si.auth.challenge` does).
+
+### Cache
+
+- `active: true` is cached for **at most 60 s** (`auth.introspectionTtlSeconds`, default and cap 60; callers can lower it, `0` disables), and **never past the token's `exp`**: the TTL is `min(60, exp - now)` in whole seconds, and a token with under a second left isn't cached. A revoked token, grant or org membership therefore takes effect within 60 s.
+- **Never cached:** `active: false`, errors, aud mismatches. A token that was inactive a moment ago is asked about again.
+- The key is `si:i:` + **SHA-256 hex of the token**. The raw token is never a key or a stored value.
+- Cached answers are re-validated on read (contract shape, age ≤ TTL even if the adapter keeps entries longer, `aud`, `exp`). An adapter error is a miss, never an allow.
+- Concurrent introspections of one token share one SI request.
+
+**Store: in-process memory by default, on purpose.** The introspection cache is a separate `memoryCache()`, not `config.cache`. A shared store (a Supabase table, KV) would cost a network round trip per call, about what the SI call it saves costs, and would copy principals (which carry the user's email) into another store. Per-isolate memory only costs extra SI calls, never correctness. If you do want sharing, pass `auth.cache` (any `CacheAdapter`); keys stay hashed and the TTL rules still apply.
+
+### The principal
+
+```ts
+interface IntrospectionPrincipal {      // frozen; only introspect creates one
+  sub: string;                          // SI user id
+  aud: string;                          // this app's resource
+  scope: string[];                      // granted scopes
+  clientId: string;                     // CIMD URL or DCR id
+  clientName: string | null;
+  grantId: string;                      // the connection id; stable across refreshes
+  requestedResource: string;            // aud, or the query variant the client used (…/mcp?instance=broth)
+  isSuperadmin: boolean;
+  organizations: Array<{ id; slug; name; roles; appGrant }>;   // same shape as membership; may be empty
+  exp: number; iat: number;             // Unix seconds
+  iss: string;
+  email?: string; name?: string;        // only when SI sends them
+  fromCache: boolean;
+}
+```
+
+Principals are frozen and registered: `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool().handler` accept only the object `introspect` returned, so a principal assembled from request data can't be passed off as verified (`InvalidArgumentError`).
+
+### Scopes: `requireScope` and the 403
+
+```ts
+si.auth.requireScope(principal, ['mcp:canva:base', 'mcp:canva:runs']);   // every one required
+```
+
+Throws `InsufficientScopeError` with `requiredScopes` (all of them) and `missingScopes`. `si.auth.challenge(err)` turns it into:
+
+```
+HTTP/1.1 403
+WWW-Authenticate: Bearer error="insufficient_scope", scope="mcp:canva:base mcp:canva:runs", resource_metadata="https://studio-canvas.supremegroup.ai/.well-known/oauth-protected-resource/mcp"
+```
+
+The `scope` lists every scope the operation needs, not just the missing one, so the client's step-up request asks for a complete set.
+
+### `challenge(err, { requestUrl? })`: 401 / 403 / 503
+
+Returns `{ status, headers, body }` (runtime-neutral; build your `Response` from it):
+
+| Error | Status | `WWW-Authenticate` |
+|---|---|---|
+| `InvalidTokenError` `missing` | `401` | `Bearer resource_metadata="…"` (no error code, RFC 6750 §3.1) |
+| `InvalidTokenError` other | `401` | `Bearer error="invalid_token", resource_metadata="…"` |
+| `InsufficientScopeError` | `403` | `Bearer error="insufficient_scope", scope="…", resource_metadata="…"` |
+| any other `SiServerError` (SI down, `429`, bad key, inactive app) | `503` (+ `Retry-After` when known) | none: it isn't the token's fault, and a 401 would send the client through OAuth again |
+| anything else | `500` | none |
+
+`resource_metadata` is the path-suffixed PRM URL. Pass `requestUrl` (the MCP URL the client called) to carry its query: `…/mcp?instance=broth` → `…/.well-known/oauth-protected-resource/mcp?instance=broth`. `bearerChallenge(params)` builds the header alone.
+
+### Protected-resource metadata (PRM)
+
+`si.auth.protectedResourceMetadata(requestUrl?)` returns the RFC 9728 document:
+
+```json
+{
+  "resource": "https://studio-canvas.supremegroup.ai/mcp?instance=broth",
+  "authorization_servers": ["https://app.supremegroup.ai"],
+  "bearer_methods_supported": ["header"],
+  "scopes_supported": ["mcp:canva:base", "mcp:canva:storyboards", "mcp:canva:runs"],
+  "resource_name": "Studio Canvas"
+}
+```
+
+- `authorization_servers` is SI's issuer: `auth.issuer`, default `baseUrl`. Set it when the issuer differs from the API origin.
+- `resource` **echoes the URL the client used**: the configured resource's origin and path, plus the query of `requestUrl` (`?instance=…`). Clients compare `resource` with the server URL they connected to. Origin and path always come from the configured resource, never the request, so a proxy that rewrites the host or path (Supabase functions behind a custom domain) can't change it.
+- `scopes_supported`, `resource_name`, `resource_documentation`, `logo_uri` come from `auth.*` and are omitted when unset.
+
+Serve the same document at both variants (clients try the path-suffixed one first):
+
+| URL | Variant |
+|---|---|
+| `GET /.well-known/oauth-protected-resource/mcp` (plus any `?instance=…`) | Path-suffixed (RFC 9728 §3.1): `/.well-known/oauth-protected-resource` + the resource path. |
+| `GET /.well-known/oauth-protected-resource` | Root. |
+
+Answer with `Content-Type: application/json` and, for browser-based clients, `Access-Control-Allow-Origin: *`.
+
+### Grant status (background jobs)
+
+```ts
+const statuses = await si.auth.grantStatus(['0199a6c2-…', '0199a6c2-…']);
+// { '0199a6c2-…': 'active', '0199a6c2-…': 'revoked' }
+```
+
+Wraps `POST /api/oauth/grants/status` for code that has a `grant_id` but no bearer (job workers, the SQL grant check). Statuses: `active`, `revoked`, `expired` (past the resource's `max_grant_lifetime_days`), `unknown` (no such grant **for this resource**; treat like `revoked`).
+
+- Ids are deduped and sent in chunks of 100 (SI's limit). An empty list returns `{}` without a call. Each id must be a non-empty string of ≤ 64 chars (`InvalidArgumentError` otherwise). Ids are matched exactly (SI's grant ids are lowercase uuids).
+- **No partial answers:** if any chunk fails, or SI's answer lacks a requested id or has an unknown status, the whole call throws (same error mapping as introspection).
+- Optional cache for `active` only: `auth.grantStatusTtlSeconds` (default **0, off**; max 60). Other statuses are never cached.
+
+### Canva-style handler
+
+A Supabase edge function serving MCP as an SI resource (SI-417). The MCP framework is up to the app; only the SDK calls matter.
+
+```ts
+import { annotations, createSiServerClient, supabaseLockStore } from '@si/server';
+import { createClient } from 'npm:@supabase/supabase-js@2';
+
+const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+
+const si = createSiServerClient({
+  baseUrl: Deno.env.get('SI_BASE_URL')!,                // https://app.supremegroup.ai
+  membershipKey: Deno.env.get('SI_MEMBERSHIP_KEY')!,
+  locks: supabaseLockStore(admin),
+  auth: {
+    resource: Deno.env.get('SI_MCP_RESOURCE')!,         // https://studio-canvas.supremegroup.ai/mcp
+    scopesSupported: ['mcp:canva:base', 'mcp:canva:storyboards', 'mcp:canva:runs'],
+    resourceName: 'Studio Canvas',
+  },
+});
+
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
+
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
+
+  // 1. PRM, root and path-suffixed.
+  if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp') {
+    return json(200, si.auth.protectedResourceMetadata(req.url), { 'Access-Control-Allow-Origin': '*' });
+  }
+
+  // 2. Every MCP request: introspect (cached ≤ 60 s), check the base scope.
+  let principal;
+  try {
+    principal = await si.auth.introspect(si.auth.bearerToken(req.headers));
+    si.auth.requireScope(principal, 'mcp:canva:base');
+  } catch (err) {
+    const c = si.auth.challenge(err, { requestUrl: req.url });
+    return json(c.status, c.body, c.headers);
+  }
+
+  // Grant mirror for SQL and background jobs (upsert on every successful introspection).
+  await admin.from('si_grants').upsert({
+    grant_id: principal.grantId,
+    supreme_user_id: Number(principal.sub),
+    client_id: principal.clientId,
+    scopes: principal.scope,
+    status: 'active',
+    last_introspected_at: new Date().toISOString(),
+  });
+
+  const rpc = await req.json();
+  if (rpc.method !== 'tools/call') return handleOtherMcp(rpc, principal);   // your MCP layer
+  const { name, arguments: args, _meta } = rpc.params;
+
+  if (name === 'list_organizations') {
+    return json(200, { jsonrpc: '2.0', id: rpc.id, result: await si.mcp.listOrganizationsTool().handler({ principal }) });
+  }
+
+  if (name === 'run_generation') {
+    try {
+      // Spend needs the optional scope: a missing one becomes a 403 step-up.
+      si.auth.requireScope(principal, ['mcp:canva:base', 'mcp:canva:runs']);
+    } catch (err) {
+      const c = si.auth.challenge(err, { requestUrl: req.url });
+      return json(c.status, c.body, c.headers);
+    }
+    try {
+      // 3. Org from the introspection answer: explicit argument, no second SI call.
+      const scope = await si.mcp.scopeToolCall({
+        principal,                                       // userId = sub, clientId = principal.clientId
+        conversationKey: si.mcp.conversationKey({ headers: req.headers, meta: _meta }),
+        organization: String(args.organization),         // slug preferred
+        tool: name,
+        kind: 'write',
+      });
+      const job = await admin.from('creative_app_jobs').insert({
+        organization_id: scope.organization.id,          // the checked org, never the raw argument
+        grant_id: principal.grantId,                     // revoking the grant in SI stops the job
+        prompt: args.prompt,
+      }).select('id').single();
+      const result = si.mcp.labelResult({ content: [{ type: 'text', text: `Queued job ${job.data!.id}.` }] }, scope);
+      return json(200, { jsonrpc: '2.0', id: rpc.id, result });
+    } catch (err) {
+      return json(200, { jsonrpc: '2.0', id: rpc.id, result: si.mcp.errorResult(err) });
+    }
+  }
+  // ...
+});
+
+// 4. Background worker: no bearer in hand, check the grants of queued jobs.
+export async function claimJobs(jobs: Array<{ id: string; grant_id: string }>) {
+  const status = await si.auth.grantStatus(jobs.map((j) => j.grant_id));    // throws → claim nothing
+  return jobs.filter((j) => status[j.grant_id] === 'active');                // revoked / expired / unknown → drop
+}
+```
+
+Notes for this flow:
+
+- The org rules (rev 3) are unchanged: explicit `organization` argument (slug preferred), `[Org: …]` banner via `labelResult`, no `structuredContent`, conversation-key lock only where the client sends a key. Only the source of the org list changes: the principal's `organizations` instead of a membership call. Its freshness is the introspection cache's (≤ 60 s), better than membership's 5 min.
+- Token errors are HTTP answers (`401` / `403`), not MCP tool errors, so the client can re-authorize or step up. Org errors stay tool errors (`errorResult`).
+- `instance` from `?instance=` carries no authority: orgs come only from `principal.organizations` and the tool argument.
+
+---
+
 ## API
 
 All methods throw an [error class](#errors) on deny. They never return a "denied" value.
@@ -287,24 +552,25 @@ type ResolvedOrganization = Membership['organizations'][number];
 
 | Method | Returns | Notes |
 |---|---|---|
-| `resolve(userId, organization)` | `ResolvedOrganization` | `organization` is a slug (case-insensitive) or numeric id (string or number). All-digit input is always an id. Unknown or not allowed → `OrgAccessDeniedError`. |
+| `resolve(userIdOrPrincipal, organization)` | `ResolvedOrganization` | `organization` is a slug (case-insensitive) or numeric id (string or number). All-digit input is always an id. Unknown or not allowed → `OrgAccessDeniedError`. With a principal from `si.auth.introspect`, resolves from its `organizations` without calling SI; any other object → `InvalidArgumentError`. |
 
 ### `si.mcp`
 
 | Method | Returns | Notes |
 |---|---|---|
 | `conversationKey({ headers, meta })` | `string \| null` | `meta` is the tool call's `params._meta`; `headers` is a Fetch `Headers` or a plain object. Values over 512 chars are ignored. |
-| `scopeToolCall(input)` | `ToolScope` | Org resolution + membership + lock (or soft mode) + detection + audit, in that order. |
+| `scopeToolCall(input)` | `ToolScope` | Org resolution + membership (or the principal's orgs) + lock (or soft mode) + detection + audit, in that order. |
 | `labelResult(result, scope)` | `McpToolResult` | `content` = `[banner, warning?, ...result.content]`. New object; input not mutated. Never adds `structuredContent`; a caller-set one passes through unchanged (don't set one for Claude). |
 | `errorResult(err)` | `McpToolResult` | `isError: true`, one text block `Error (<code>): <message>`, no `structuredContent`. Public message only. Unknown errors → `internal_error` with a generic message. |
-| `listOrganizationsTool()` | `{ definition, handler }` | Read-only tool. `handler({ userId })` returns `{ data: [{ organization_id, slug, name, roles, app_grant }], meta: { count } }` as JSON text only (no `structuredContent`). Errors come back as `errorResult`. |
+| `listOrganizationsTool()` | `{ definition, handler }` | Read-only tool. `handler({ userId })` or `handler({ principal })` returns `{ data: [{ organization_id, slug, name, roles, app_grant }], meta: { count } }` as JSON text only (no `structuredContent`). Errors come back as `errorResult`. |
 | `annotations` | presets | Same object as the top-level `annotations` export. |
 
 ```ts
 interface ScopeToolCallInput {
-  userId: number | string;          // SI user id of the VERIFIED caller (token sub), never request input
-  principalId?: string;             // default String(userId)
-  clientId: string;                 // OAuth client id / MCP client: keeps ChatGPT and Claude apart
+  principal?: IntrospectionPrincipal; // from si.auth.introspect: org list from SI's answer, no membership call
+  userId?: number | string;         // or: SI user id of the VERIFIED caller (token sub), never request input
+  principalId?: string;             // default String(userId) (= principal.sub)
+  clientId?: string;                // OAuth client id / MCP client: keeps ChatGPT and Claude apart. Required with userId; default principal.clientId
   conversationKey: string | null;   // from conversationKey(); null → soft mode
   organization: string | number;    // the tool argument
   tool: string;                     // for audit
@@ -322,11 +588,27 @@ interface ToolScope {
 }
 ```
 
+Pass `principal` or `userId`. With both, `userId` must equal `principal.sub`. An expired principal throws `InvalidTokenError` (`expired`).
+
 | Preset | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
 |---|---|---|---|---|
 | `annotations.read` | `true` | `false` | `true` | `false` |
 | `annotations.write` | `false` | `false` | `false` | `false` |
 | `annotations.destructive` | `false` | `true` | `false` | `false` |
+
+### `si.auth`
+
+See [Token introspection](#token-introspection-siauth).
+
+| Method | Returns | Notes |
+|---|---|---|
+| `introspect(bearer, { resource? })` | `IntrospectionPrincipal` | `POST /api/oauth/introspect`. Checks `active`, `aud`, `exp`. Caches `active: true` ≤ 60 s and ≤ `exp`, keyed by SHA-256 of the token; never caches anything else. |
+| `grantStatus(grantIds)` | `{ [grantId]: 'active' \| 'revoked' \| 'expired' \| 'unknown' }` | `POST /api/oauth/grants/status`, chunked by 100, deduped, no partial answers. Optional `active`-only cache. |
+| `requireScope(principal, scope \| scopes)` | `void` | Throws `InsufficientScopeError` (`requiredScopes`, `missingScopes`). |
+| `challenge(err, { requestUrl?, resourceMetadataUrl? })` | `{ status, headers, body }` | 401 / 403 with `WWW-Authenticate`, 503 (+ `Retry-After`) when SI couldn't answer. |
+| `protectedResourceMetadata(requestUrl?)` | `ProtectedResourceMetadata` | RFC 9728 JSON; `resource` = configured resource + the request's query. |
+| `resourceMetadataUrl(requestUrl?)` | `string` | Path-suffixed PRM URL for `resource_metadata`. |
+| `bearerToken(headers)` | `string \| null` | Token of `Authorization: Bearer …`. |
 
 ### `si.locks`
 
@@ -354,7 +636,7 @@ interface ToolScope {
 
 ### Standalone exports
 
-`conversationKey(source, options?)`, `hashConversationKey(key)`, `labelResult`, `errorResult`, `orgBanner(org)`, `annotations`, `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL`, `SERVER_SDK_VERSION`, constants (`MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`) and all types.
+`conversationKey(source, options?)`, `hashConversationKey(key)`, `labelResult`, `errorResult`, `orgBanner(org)`, `annotations`, `requireScope`, `bearerChallenge(params)`, `bearerToken(headers)`, `canonicalResourceUri(uri)`, `isVerifiedPrincipal(value)`, `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL`, `SERVER_SDK_VERSION`, constants (`MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`, `INTROSPECT_PATH`, `GRANT_STATUS_PATH`, `PROTECTED_RESOURCE_METADATA_PATH`, `MAX_INTROSPECTION_TTL_SECONDS`, `MAX_GRANT_STATUS_TTL_SECONDS`, `GRANT_STATUS_CHUNK_SIZE`) and all types.
 
 ---
 
@@ -367,11 +649,14 @@ Every class extends `SiServerError` with a stable `code`, a `message` for logs a
 | `OrgAccessDeniedError` | `org_access_denied` | Org not in the user's membership for this app, or doesn't exist. | Show the error; the model can call `list_organizations`. |
 | `OrgLockedError` | `org_locked` | Conversation key already bound to another org. `lockedOrganization`, `requestedOrganization`. | Tell the user to start a new conversation. |
 | `UserGoneError` | `user_not_found` | SI `404 user_not_found`. Cached ≤ 30 s. | Revoke the user's connection / tokens. |
-| `SiUnavailableError` | `si_unavailable` | Network error, timeout, 5xx, `429` without fresh cache, malformed body, unexpected status. `reason`: `network`, `timeout`, `server_error`, `rate_limited`, `malformed_response`, `unexpected_status`. | Retry later. |
-| `MisconfiguredKeyError` | `misconfigured_key` | Empty key at construction, SI `401`, or SI `500 misconfigured_key`. `status` tells them apart. | Alert ops; ask SI to (re)issue the key. |
+| `SiUnavailableError` | `si_unavailable` | Network error, timeout, 5xx, `429` without fresh cache, malformed body, unexpected status. `reason`: `network`, `timeout`, `server_error`, `rate_limited`, `malformed_response`, `unexpected_status`. `retryAfterSeconds` on a `429` with `Retry-After`. | Retry later (MCP request: `503`). |
+| `InvalidTokenError` | `invalid_token` | `si.auth.introspect`: no token, `active: false`, `aud` mismatch, or expired. `reason`: `missing`, `inactive`, `audience_mismatch`, `expired`. Never cached. | `401` with `resource_metadata` (`si.auth.challenge`). |
+| `InsufficientScopeError` | `insufficient_scope` | `requireScope`: the token lacks a scope. `requiredScopes`, `missingScopes`. | `403 insufficient_scope` listing `requiredScopes`. |
+| `SiValidationError` | `validation_failed` | SI `422` on introspection / grant status. `errors`. | Fix the caller (an SDK/contract mismatch). |
+| `MisconfiguredKeyError` | `misconfigured_key` | Empty key at construction, SI `401`, or SI `500 misconfigured_key` (for introspection also: the key's app has no MCP resource). `status` tells them apart. | Alert ops; ask SI to (re)issue the key. |
 | `AppInactiveError` | `app_inactive` | SI `403 app_inactive`. | The app is switched off in SI. |
 | `LockStoreUnavailableError` | `lock_store_unavailable` | The lock store failed while a conversation key was present. | Retry later; check the store. |
-| `InvalidArgumentError` | `invalid_argument` | Bad `userId`, empty `organization`, missing `clientId` / `tool`, bad config. | Fix the caller. |
+| `InvalidArgumentError` | `invalid_argument` | Bad `userId`, empty `organization`, missing `clientId` / `tool`, bad config, no `auth.resource`, a principal not created by `introspect`, bad grant ids. | Fix the caller. |
 
 ### HTTP behaviour
 
@@ -542,6 +827,10 @@ Request body:
 |---|---|---|
 | `GET` | `/api/membership/users/{user}/organizations` | SI-374, live. Response `{ data: { user: { id }, app: { id, name }, is_superadmin, organizations: [{ id, slug, name, roles, app_grant }] }, meta: { count, generated_at } }`. Errors `401`, `403 app_inactive`, `404 user_not_found`, `429`, `500 misconfigured_key`. 600 req/min per key. |
 | `POST` | `/api/membership/audit-events` | SI-379, not live yet. Opt-in. |
+| `POST` | `/api/oauth/introspect` | SI-411, live on main. JSON `{ token }`. `200` `{"active": false}` or the active body ([principal](#the-principal)). Errors `401`, `403 app_inactive`, `422`, `429`, `500 misconfigured_key`. `Cache-Control: no-store`. |
+| `POST` | `/api/oauth/grants/status` | SI-411, live on main. JSON `{ grant_ids: [...] }` (1–100). `200` `{ "<id>": "active" \| "revoked" \| "expired" \| "unknown" }`. Same errors. |
+
+Introspection and grant status share SI's `mcp-introspect` limit: 1200 requests per minute per key (separate from membership's 600). Contract: SI `docs/api/knowledge-lake-mcp-oauth.md` § Token introspection and grant status.
 
 The SDK validates the whole `200` body (integer ids, string slug/name/app_grant, string-array roles, `data.user.id` equal to the requested user). Any mismatch is `si_unavailable` / `malformed_response`.
 
@@ -551,14 +840,15 @@ The SDK validates the whole `200` body (integer ids, string slug/name/app_grant,
 
 - The app's own tools and asset permission rules (built on `scope.roles`).
 - Data-layer enforcement (RLS / query scoping). The SDK returns the checked org; **the app must scope its queries with `scope.organization.id`**.
-- Token issuance, consent and introspection (SI-375; a later version adds `si.auth.introspect`).
+- Token issuance and consent (SI is the authorization server). The SDK only introspects.
+- Token passthrough: never forward the client's bearer to upstream APIs.
 
 ---
 
 ## Version policy
 
 - Each release says in the changelog whether it contains a security fix.
-- SI may send `X-SI-Min-Server-SDK` on its responses. When this SDK is older, it logs one warning through `logger.warn`.
+- SI may send `X-SI-Min-Server-SDK` on its responses (membership, introspection, grant status). When this SDK is older, it logs one warning through `logger.warn`. As of SI main on 2026-10-15, SI doesn't send it yet.
 - Apps using `si-sdk/server` are listed in the README so each release can be rolled out to them.
 
 ## Testing
@@ -566,6 +856,9 @@ The SDK validates the whole `200` body (integer ids, string slug/name/app_grant,
 ```bash
 npm run build && npm test                      # dist checks need a fresh build
 SI_TEST_PG_URL=postgres://postgres:postgres@localhost:5432/postgres npx jest supabase-sql   # optional, real Postgres
+SI_TEST_INTROSPECT_KEY=si-… SI_TEST_BEARER=… npx jest introspect-live   # optional, staging SI
 ```
+
+The live introspection test defaults to `https://v2.supremegroup.ai` (staging) and the resource `https://studio-canvas.supremegroup.ai/mcp`; override with `SI_TEST_BASE_URL` / `SI_TEST_RESOURCE`. It needs the resource registered on that SI and a bearer issued for it.
 
 Deno: the bundle is verified to import as plain ESM in Node (`node -e "import('./dist/server.mjs')"`). A Deno / Supabase edge smoke test is a follow-up for the first adopting app (si-canva, SI-380).
