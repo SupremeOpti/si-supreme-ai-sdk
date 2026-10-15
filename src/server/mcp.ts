@@ -1,11 +1,12 @@
 import type { AuditApi } from './audit';
 import { conversationKey, hashConversationKey, type ConversationKeySource } from './conversation';
 import type { DetectionApi } from './detection';
-import { InvalidArgumentError, isSiServerError, OrgLockedError, type SiServerErrorCode } from './errors';
+import { isVerifiedPrincipal } from './auth';
+import { InvalidArgumentError, InvalidTokenError, isSiServerError, OrgLockedError, type SiServerErrorCode } from './errors';
 import type { LocksApi } from './locks';
 import type { MembershipApi } from './membership';
 import type { OrganizationsApi } from './organizations';
-import type { AppGrant, ConversationKeyOptions, Logger, ScopeMode, ToolKind } from './types';
+import type { AppGrant, ConversationKeyOptions, IntrospectionPrincipal, Logger, MembershipOrganization, ScopeMode, ToolKind } from './types';
 
 /** Minimal MCP `CallToolResult` shape. Extra fields pass through untouched. */
 export interface McpContentBlock {
@@ -43,13 +44,23 @@ export interface ScopeToolCallInput {
   /**
    * SI user id of the **authenticated** caller: the `sub` of the token your
    * server verified. Never take it from tool arguments or other request
-   * input; the SDK trusts it as the identity to check.
+   * input; the SDK trusts it as the identity to check. Pass this or
+   * `principal`.
    */
-  userId: number | string;
+  userId?: number | string;
+  /**
+   * The principal from `si.auth.introspect` for this request. The org is
+   * resolved from its `organizations` (no membership call); `userId`
+   * defaults to its `sub` and `clientId` to its `clientId`.
+   */
+  principal?: IntrospectionPrincipal;
   /** The app's principal id for lock/detection/audit keys. Default `String(userId)`. */
   principalId?: string;
-  /** OAuth client id or MCP client name: separates ChatGPT from Claude for the same user. */
-  clientId: string;
+  /**
+   * OAuth client id or MCP client name: separates ChatGPT from Claude for the
+   * same user. Required with `userId`; defaults to `principal.clientId`.
+   */
+  clientId?: string;
   /** From `si.mcp.conversationKey(...)`. `null` → soft mode. */
   conversationKey: string | null;
   /** The tool's `organization` argument: slug (preferred) or numeric id. */
@@ -83,8 +94,12 @@ export interface ListOrganizationsTool {
     inputSchema: { type: 'object'; properties: Record<string, never>; additionalProperties: false };
     annotations: McpToolAnnotations;
   };
-  /** Lists the user's orgs for this app, same shape as SI's `list_organizations`. `userId` must be the verified caller. */
-  handler(input: { userId: number | string }): Promise<McpToolResult>;
+  /**
+   * Lists the user's orgs for this app, same shape as SI's `list_organizations`.
+   * Pass the verified caller's `userId`, or the `principal` from
+   * `si.auth.introspect` (no membership call).
+   */
+  handler(input: { userId?: number | string; principal?: IntrospectionPrincipal }): Promise<McpToolResult>;
 }
 
 export interface McpApi {
@@ -145,9 +160,12 @@ export function errorResult(err: unknown): McpToolResult {
 
 export function createMcp(deps: McpDeps): McpApi {
   const scopeToolCall = async (input: ScopeToolCallInput): Promise<ToolScope> => {
-    const clientId = typeof input.clientId === 'string' ? input.clientId.trim() : '';
+    const principal = input.principal;
+    const userId = principal !== undefined && input.userId === undefined && isVerifiedPrincipal(principal) ? principal.sub : input.userId;
+    const rawClientId = input.clientId ?? (principal !== undefined && isVerifiedPrincipal(principal) ? principal.clientId : undefined);
+    const clientId = typeof rawClientId === 'string' ? rawClientId.trim() : '';
     const tool = typeof input.tool === 'string' ? input.tool.trim() : '';
-    const principalId = (input.principalId ?? String(input.userId)).trim();
+    const principalId = (input.principalId ?? String(userId)).trim();
     const kind: ToolKind = input.kind === 'read' ? 'read' : 'write';
     const key = typeof input.conversationKey === 'string' && input.conversationKey.trim() ? input.conversationKey.trim() : null;
     const mode: ScopeMode = key ? 'locked' : 'soft';
@@ -156,7 +174,7 @@ export function createMcp(deps: McpDeps): McpApi {
     let organizationId: number | null = null;
     const audit = (outcome: string) =>
       deps.audit.emit({
-        principalId: principalId || String(input.userId),
+        principalId: principalId || String(userId),
         clientId,
         mode,
         keyHash,
@@ -168,12 +186,21 @@ export function createMcp(deps: McpDeps): McpApi {
       });
 
     try {
+      if (principal !== undefined) {
+        if (!isVerifiedPrincipal(principal)) throw new InvalidArgumentError('principal must be the object returned by si.auth.introspect');
+        if (input.userId !== undefined && String(input.userId).trim() !== principal.sub) {
+          throw new InvalidArgumentError('userId does not match principal.sub');
+        }
+        if (principal.exp * 1000 <= deps.now()) throw new InvalidTokenError('expired');
+      } else if (userId === undefined) {
+        throw new InvalidArgumentError('userId or principal is required');
+      }
       if (!clientId) throw new InvalidArgumentError('clientId is required');
       if (!tool) throw new InvalidArgumentError('tool is required');
       if (!principalId) throw new InvalidArgumentError('principalId must not be empty');
       if (key) keyHash = await hashConversationKey(key);
 
-      const org = await deps.organizations.resolve(input.userId, input.organization);
+      const org = await deps.organizations.resolve(principal ?? (userId as number | string), input.organization);
       organizationId = org.id;
 
       try {
@@ -184,8 +211,8 @@ export function createMcp(deps: McpDeps): McpApi {
           const lockedId = err.lockedOrganization.id;
           let locked: { id: number; slug?: string; name?: string } = { id: lockedId };
           try {
-            const m = await deps.membership.get(input.userId);
-            const o = m.organizations.find((x) => x.id === lockedId);
+            const orgs: readonly MembershipOrganization[] = principal ? principal.organizations : (await deps.membership.get(userId as number | string)).organizations;
+            const o = orgs.find((x) => x.id === lockedId);
             if (o) locked = { id: o.id, slug: o.slug, name: o.name };
           } catch {
             // keep the bare id
@@ -208,7 +235,7 @@ export function createMcp(deps: McpDeps): McpApi {
         mode,
         keyHash,
         warning,
-        userId: String(input.userId),
+        userId: String(userId),
         principalId,
         clientId,
         tool,
@@ -229,18 +256,27 @@ export function createMcp(deps: McpDeps): McpApi {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: annotations.read,
     },
-    async handler({ userId }) {
+    async handler({ userId, principal }) {
       try {
-        const m = await deps.membership.get(userId);
+        let organizations: readonly MembershipOrganization[];
+        if (principal !== undefined) {
+          if (!isVerifiedPrincipal(principal)) throw new InvalidArgumentError('principal must be the object returned by si.auth.introspect');
+          if (principal.exp * 1000 <= deps.now()) throw new InvalidTokenError('expired');
+          organizations = principal.organizations;
+        } else if (userId !== undefined) {
+          organizations = (await deps.membership.get(userId)).organizations;
+        } else {
+          throw new InvalidArgumentError('userId or principal is required');
+        }
         const payload = {
-          data: m.organizations.map((o) => ({
+          data: organizations.map((o) => ({
             organization_id: o.id,
             slug: o.slug,
             name: o.name,
             roles: [...o.roles],
             app_grant: o.appGrant,
           })),
-          meta: { count: m.organizations.length },
+          meta: { count: organizations.length },
         };
         return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
       } catch (err) {

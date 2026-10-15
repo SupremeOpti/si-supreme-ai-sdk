@@ -81,6 +81,70 @@ interface Membership {
 }
 /** An organization the user may use in this app right now. */
 type ResolvedOrganization = MembershipOrganization;
+/**
+ * A verified SI access token: the normalized `active: true` answer of
+ * `POST /api/oauth/introspect`. Only `si.auth.introspect` creates one (the
+ * object is frozen, and `scopeToolCall` rejects look-alikes).
+ */
+interface IntrospectionPrincipal {
+    /** SI user id, as a string. Key your user rows on it. */
+    readonly sub: string;
+    /** This app's canonical resource URI (already checked by the SDK). */
+    readonly aud: string;
+    /** Granted scopes (SI's space-separated `scope`, split). */
+    readonly scope: readonly string[];
+    /** The MCP client: its CIMD URL, or its DCR id. */
+    readonly clientId: string;
+    readonly clientName: string | null;
+    /** The user's consent to this client at this resource. Stable across refreshes; use it as the connection id. */
+    readonly grantId: string;
+    /** The `resource` the client asked for: `aud`, or a query variant such as `…/mcp?instance=broth`. */
+    readonly requestedResource: string;
+    readonly isSuperadmin: boolean;
+    /** Orgs the user may use this app in, computed live by SI (same shape as membership). May be empty. */
+    readonly organizations: readonly Readonly<MembershipOrganization>[];
+    /** Expiry, Unix seconds. */
+    readonly exp: number;
+    /** Issued at, Unix seconds. */
+    readonly iat: number;
+    /** SI's issuer. */
+    readonly iss: string;
+    /** Only when SI returns it. */
+    readonly email?: string;
+    /** Only when SI returns it. */
+    readonly name?: string;
+    /** True when served from the introspection cache. */
+    readonly fromCache: boolean;
+}
+type GrantStatus = 'active' | 'revoked' | 'expired' | 'unknown';
+interface AuthConfig {
+    /**
+     * This app's canonical MCP resource URI, exactly as registered in SI
+     * (`mcp_resources.resource_uri`), e.g. `https://studio-canvas.supremegroup.ai/mcp`.
+     * Introspection rejects tokens whose `aud` differs. Can also be passed per call.
+     */
+    resource?: string;
+    /** SI's OAuth issuer for `authorization_servers` in the PRM. Default `baseUrl`. */
+    issuer?: string;
+    /**
+     * Cache for introspection and grant-status answers. Default: a separate
+     * in-process `memoryCache()` (not `config.cache`), so principals (which
+     * carry email) stay in process unless you opt into a shared store.
+     */
+    cache?: CacheAdapter;
+    /** Cache TTL for `active: true` answers, further capped by the token's `exp`. Default and max 60 s; 0 disables. */
+    introspectionTtlSeconds?: number;
+    /** Cache TTL for `active` grant statuses. Default 0 (off), max 60 s. */
+    grantStatusTtlSeconds?: number;
+    /** `scopes_supported` in the PRM. */
+    scopesSupported?: string[];
+    /** `resource_name` in the PRM. */
+    resourceName?: string;
+    /** `resource_documentation` in the PRM. */
+    resourceDocumentation?: string;
+    /** `logo_uri` in the PRM. */
+    logoUri?: string;
+}
 type ToolKind = 'read' | 'write';
 type ScopeMode = 'locked' | 'soft';
 interface AuditEvent {
@@ -145,6 +209,8 @@ interface SiServerConfig {
         windowSeconds?: number;
     };
     conversation?: ConversationKeyOptions;
+    /** Token introspection, grant status and protected-resource metadata (`si.auth`). */
+    auth?: AuthConfig;
     /** Called for every `scopeToolCall`. Errors are swallowed. */
     onAudit?: (event: AuditEvent) => void | Promise<void>;
     /** Forward audit events to SI. Opt-in, default off. */
@@ -153,7 +219,7 @@ interface SiServerConfig {
     now?: () => number;
 }
 
-declare const SERVER_SDK_VERSION = "1.2.1";
+declare const SERVER_SDK_VERSION = "1.3.0";
 
 declare const AUDIT_EVENTS_PATH = "/api/membership/audit-events";
 interface AuditApi {
@@ -167,6 +233,113 @@ interface AuditApi {
     /** Whether forwarding to SI is enabled. */
     readonly forwarding: boolean;
 }
+
+/** Header-ish input: a Fetch `Headers`, or a plain object (Node `IncomingHttpHeaders`, etc.). */
+type HeadersInput = HeadersLike | Record<string, string | string[] | undefined | null>;
+interface ConversationKeySource {
+    /** The HTTP request headers of the MCP call. */
+    headers?: HeadersInput | null;
+    /** The tool call's `params._meta`. */
+    meta?: Record<string, unknown> | null;
+}
+declare const DEFAULT_CODEX_HEADERS: string[];
+declare const DEFAULT_SI_HEADER = "x-si-conversation";
+/**
+ * Best available per-conversation key: `_meta["openai/session"]` (ChatGPT) →
+ * Codex header → `X-SI-Conversation` → `null`. Never `Mcp-Session-Id`, which
+ * Claude shares across conversations. A guard against model confusion, never
+ * an authorization input.
+ */
+declare function conversationKey(source: ConversationKeySource | null | undefined, options?: ConversationKeyOptions): string | null;
+/** SHA-256 hex of a conversation key. Only the hash is stored or forwarded. */
+declare function hashConversationKey(key: string): Promise<string>;
+
+declare const INTROSPECT_PATH = "/api/oauth/introspect";
+declare const GRANT_STATUS_PATH = "/api/oauth/grants/status";
+declare const PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+/** SI's caching rule for `active: true` (and `active` grant statuses). */
+declare const MAX_INTROSPECTION_TTL_SECONDS = 60;
+declare const MAX_GRANT_STATUS_TTL_SECONDS = 60;
+/** SI's batch limit for `grants/status`; larger inputs are chunked. */
+declare const GRANT_STATUS_CHUNK_SIZE = 100;
+interface IntrospectOptions {
+    /** Canonical resource URI to check `aud` against. Default `config.auth.resource`. */
+    resource?: string;
+}
+/** RFC 9728 protected-resource metadata. */
+interface ProtectedResourceMetadata {
+    resource: string;
+    authorization_servers: string[];
+    bearer_methods_supported: string[];
+    scopes_supported?: string[];
+    resource_name?: string;
+    resource_documentation?: string;
+    logo_uri?: string;
+}
+/** A ready-to-send HTTP error answer for an MCP request. Runtime-neutral: build your own `Response` from it. */
+interface AuthChallenge {
+    status: 401 | 403 | 500 | 503;
+    headers: Record<string, string>;
+    body: {
+        error: string;
+        error_description: string;
+    };
+}
+interface ChallengeOptions {
+    /** The MCP URL the client used (e.g. `req.url`); its query (`?instance=…`) is echoed into `resource_metadata`. */
+    requestUrl?: string;
+    /** Override the `resource_metadata` URL entirely. */
+    resourceMetadataUrl?: string;
+}
+interface AuthApi {
+    /**
+     * Introspect an MCP client's bearer token against SI. Returns the verified
+     * principal, or throws: `InvalidTokenError` (missing, inactive, wrong `aud`,
+     * expired), `SiUnavailableError` (network, timeout, 5xx, 429, malformed),
+     * `MisconfiguredKeyError`, `AppInactiveError`, `SiValidationError`. There is
+     * no path that returns a principal without SI's `active: true`.
+     */
+    introspect(bearer: string | null | undefined, options?: IntrospectOptions): Promise<IntrospectionPrincipal>;
+    /** Live grant states, chunked by 100. Throws on any failed chunk (no partial answers). */
+    grantStatus(grantIds: readonly string[]): Promise<Record<string, GrantStatus>>;
+    /** Throws `InsufficientScopeError` unless the principal has every scope. */
+    requireScope(principal: Pick<IntrospectionPrincipal, 'scope'>, scope: string | readonly string[]): void;
+    /** JSON for `/.well-known/oauth-protected-resource` (root and path-suffixed). */
+    protectedResourceMetadata(requestUrl?: string): ProtectedResourceMetadata;
+    /** The path-suffixed PRM URL for the 401 `resource_metadata` parameter. */
+    resourceMetadataUrl(requestUrl?: string): string;
+    /** Map an error from `introspect` / `requireScope` to a 401 / 403 / 503 answer with `WWW-Authenticate`. */
+    challenge(err: unknown, options?: ChallengeOptions): AuthChallenge;
+    /** The bearer token from an `Authorization` header, or null. */
+    bearerToken(headers: HeadersInput | null | undefined): string | null;
+}
+/** True for a principal returned by `si.auth.introspect` (not a copy or a look-alike). */
+declare function isVerifiedPrincipal(value: unknown): value is IntrospectionPrincipal;
+/**
+ * Canonical form of a resource URI, as SI compares them: lowercase scheme
+ * and host, no default port, one trailing `/` stripped, query kept, no
+ * fragment. Must be https (http only for localhost).
+ */
+declare function canonicalResourceUri(uri: string): string;
+/**
+ * `WWW-Authenticate` value for a Bearer challenge (RFC 6750 §3, RFC 9728 §5.1),
+ * e.g. `Bearer error="insufficient_scope", scope="a b", resource_metadata="https://…"`.
+ */
+declare function bearerChallenge(params: {
+    realm?: string;
+    error?: 'invalid_token' | 'insufficient_scope' | 'invalid_request';
+    errorDescription?: string;
+    scope?: string | readonly string[];
+    resourceMetadata?: string;
+}): string;
+/** The token of an `Authorization: Bearer <token>` header, or null. */
+declare function bearerToken(headers: HeadersInput | null | undefined): string | null;
+/**
+ * Throws `InsufficientScopeError` unless `principal.scope` contains every
+ * scope in `scope`. The error carries all of them (for the challenge's
+ * `scope`), not only the missing ones.
+ */
+declare function requireScope(principal: Pick<IntrospectionPrincipal, 'scope'>, scope: string | readonly string[]): void;
 
 declare const DEFAULT_DETECTION_WINDOW_SECONDS: number;
 interface DetectionOrg {
@@ -224,34 +397,15 @@ interface MembershipApi {
     invalidate(userId: number | string): Promise<void>;
 }
 
-/** Header-ish input: a Fetch `Headers`, or a plain object (Node `IncomingHttpHeaders`, etc.). */
-type HeadersInput = HeadersLike | Record<string, string | string[] | undefined | null>;
-interface ConversationKeySource {
-    /** The HTTP request headers of the MCP call. */
-    headers?: HeadersInput | null;
-    /** The tool call's `params._meta`. */
-    meta?: Record<string, unknown> | null;
-}
-declare const DEFAULT_CODEX_HEADERS: string[];
-declare const DEFAULT_SI_HEADER = "x-si-conversation";
-/**
- * Best available per-conversation key: `_meta["openai/session"]` (ChatGPT) →
- * Codex header → `X-SI-Conversation` → `null`. Never `Mcp-Session-Id`, which
- * Claude shares across conversations. A guard against model confusion, never
- * an authorization input.
- */
-declare function conversationKey(source: ConversationKeySource | null | undefined, options?: ConversationKeyOptions): string | null;
-/** SHA-256 hex of a conversation key. Only the hash is stored or forwarded. */
-declare function hashConversationKey(key: string): Promise<string>;
-
 interface OrganizationsApi {
     /**
      * Resolve an `organization` tool argument (slug, or numeric id as a string
-     * or number) against the user's live SI membership. Unknown and
-     * not-allowed orgs both throw `OrgAccessDeniedError`, so a caller can't
-     * probe which orgs exist.
+     * or number). With a user id it checks the user's live SI membership; with
+     * a principal from `si.auth.introspect` it uses the principal's
+     * `organizations` (no second SI call). Unknown and not-allowed orgs both
+     * throw `OrgAccessDeniedError`, so a caller can't probe which orgs exist.
      */
-    resolve(userId: number | string, organization: string | number): Promise<ResolvedOrganization>;
+    resolve(user: number | string | IntrospectionPrincipal, organization: string | number): Promise<ResolvedOrganization>;
 }
 
 /** Minimal MCP `CallToolResult` shape. Extra fields pass through untouched. */
@@ -285,13 +439,23 @@ interface ScopeToolCallInput {
     /**
      * SI user id of the **authenticated** caller: the `sub` of the token your
      * server verified. Never take it from tool arguments or other request
-     * input; the SDK trusts it as the identity to check.
+     * input; the SDK trusts it as the identity to check. Pass this or
+     * `principal`.
      */
-    userId: number | string;
+    userId?: number | string;
+    /**
+     * The principal from `si.auth.introspect` for this request. The org is
+     * resolved from its `organizations` (no membership call); `userId`
+     * defaults to its `sub` and `clientId` to its `clientId`.
+     */
+    principal?: IntrospectionPrincipal;
     /** The app's principal id for lock/detection/audit keys. Default `String(userId)`. */
     principalId?: string;
-    /** OAuth client id or MCP client name: separates ChatGPT from Claude for the same user. */
-    clientId: string;
+    /**
+     * OAuth client id or MCP client name: separates ChatGPT from Claude for the
+     * same user. Required with `userId`; defaults to `principal.clientId`.
+     */
+    clientId?: string;
     /** From `si.mcp.conversationKey(...)`. `null` → soft mode. */
     conversationKey: string | null;
     /** The tool's `organization` argument: slug (preferred) or numeric id. */
@@ -331,9 +495,14 @@ interface ListOrganizationsTool {
         };
         annotations: McpToolAnnotations;
     };
-    /** Lists the user's orgs for this app, same shape as SI's `list_organizations`. `userId` must be the verified caller. */
+    /**
+     * Lists the user's orgs for this app, same shape as SI's `list_organizations`.
+     * Pass the verified caller's `userId`, or the `principal` from
+     * `si.auth.introspect` (no membership call).
+     */
     handler(input: {
-        userId: number | string;
+        userId?: number | string;
+        principal?: IntrospectionPrincipal;
     }): Promise<McpToolResult>;
 }
 interface McpApi {
@@ -371,6 +540,8 @@ declare function labelResult(result: McpToolResult, scope: Pick<ToolScope, 'orga
 declare function errorResult(err: unknown): McpToolResult;
 
 interface SiServerClient {
+    /** Token introspection, grant status, scope checks and protected-resource metadata. */
+    auth: AuthApi;
     membership: MembershipApi;
     organizations: OrganizationsApi;
     locks: LocksApi;
@@ -391,7 +562,7 @@ declare function createSiServerClient(config: SiServerConfig): SiServerClient;
  * `message` may contain operator detail (status codes, reasons) and is meant
  * for logs. `publicMessage` is safe to show to an MCP client or end user.
  */
-type SiServerErrorCode = 'org_access_denied' | 'org_locked' | 'user_not_found' | 'si_unavailable' | 'misconfigured_key' | 'app_inactive' | 'lock_store_unavailable' | 'invalid_argument';
+type SiServerErrorCode = 'org_access_denied' | 'org_locked' | 'user_not_found' | 'si_unavailable' | 'misconfigured_key' | 'app_inactive' | 'lock_store_unavailable' | 'invalid_argument' | 'invalid_token' | 'insufficient_scope' | 'validation_failed';
 declare class SiServerError extends Error {
     readonly code: SiServerErrorCode;
     readonly publicMessage: string;
@@ -423,7 +594,9 @@ type SiUnavailableReason = 'network' | 'timeout' | 'server_error' | 'rate_limite
 declare class SiUnavailableError extends SiServerError {
     readonly reason: SiUnavailableReason;
     readonly status?: number;
-    constructor(reason: SiUnavailableReason, detail?: string, status?: number);
+    /** From SI's `Retry-After` on a `429`, when present. */
+    readonly retryAfterSeconds?: number;
+    constructor(reason: SiUnavailableReason, detail?: string, status?: number, retryAfterSeconds?: number);
 }
 /** The membership key is missing, rejected (`401`) or not linked to an app (`500 misconfigured_key`). */
 declare class MisconfiguredKeyError extends SiServerError {
@@ -441,6 +614,41 @@ declare class LockStoreUnavailableError extends SiServerError {
 /** A caller passed an unusable argument (bad user id, empty organization, ...). */
 declare class InvalidArgumentError extends SiServerError {
     constructor(detail: string);
+}
+type InvalidTokenReason = 
+/** No bearer token on the request. */
+'missing'
+/** SI answered `{"active": false}`. */
+ | 'inactive'
+/** SI said active, but `aud` isn't this app's resource. */
+ | 'audience_mismatch'
+/** `exp` is in the past by the local clock. */
+ | 'expired';
+/**
+ * The bearer token can't be used here. Answer the MCP client `401` with
+ * `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="…"`
+ * (`si.auth.challenge(err)` builds it).
+ */
+declare class InvalidTokenError extends SiServerError {
+    readonly reason: InvalidTokenReason;
+    constructor(reason: InvalidTokenReason);
+}
+/**
+ * The token is valid but lacks a scope the operation needs. Answer `403`
+ * with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`,
+ * listing **every** scope the operation needs so the client can step up.
+ */
+declare class InsufficientScopeError extends SiServerError {
+    /** Every scope the operation needs (what goes in the challenge's `scope`). */
+    readonly requiredScopes: string[];
+    /** The required scopes the token doesn't have. */
+    readonly missingScopes: string[];
+    constructor(requiredScopes: string[], missingScopes: string[]);
+}
+/** SI answered `422 validation_failed`: the SDK sent a request SI rejects. Always a deny. */
+declare class SiValidationError extends SiServerError {
+    readonly errors: Record<string, unknown>;
+    constructor(errors?: Record<string, unknown>);
 }
 declare function isSiServerError(err: unknown): err is SiServerError;
 
@@ -490,4 +698,4 @@ declare const SUPABASE_LOCK_STORE_SQL = "-- @supreme-ai/si-sdk/server: conversat
  */
 declare function supabaseLockStore(client: SupabaseRpcClient, options?: SupabaseLockStoreOptions): LockStoreAdapter;
 
-export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, type HeadersInput, type HeadersLike, InvalidArgumentError, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, type ResolvedOrganization, SERVER_SDK_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, annotations, conversationKey, createSiServerClient, errorResult, hashConversationKey, isSiServerError, labelResult, memoryCache, memoryLockStore, orgBanner, supabaseLockStore };
+export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, annotations, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore };

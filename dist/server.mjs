@@ -135,54 +135,43 @@ function createAudit(deps) {
   };
 }
 
-// src/server/detection.ts
-var DEFAULT_DETECTION_WINDOW_SECONDS = 15 * 60;
-var MAX_ENTRIES = 20;
-function isEntry(v) {
-  if (!v || typeof v !== "object") return false;
-  const e = v;
-  return typeof e.id === "number" && typeof e.slug === "string" && typeof e.name === "string" && typeof e.at === "number";
+// src/server/conversation.ts
+var DEFAULT_CODEX_HEADERS = ["x-codex-conversation-id", "x-codex-session-id"];
+var DEFAULT_SI_HEADER = "x-si-conversation";
+var MAX_KEY_LENGTH = 512;
+function clean(value) {
+  if (Array.isArray(value)) value = value[0];
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  if (!v || v.length > MAX_KEY_LENGTH) return null;
+  return v;
 }
-function ago(ms) {
-  const min = Math.floor(ms / 6e4);
-  if (min < 1) return "less than a minute ago";
-  return min === 1 ? "1 min ago" : `${min} min ago`;
+function readHeader(headers, name) {
+  if (typeof headers.get === "function") return clean(headers.get(name));
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === lower) return clean(v);
+  }
+  return null;
 }
-function createDetection(deps) {
-  const key = (p, c) => `si:d:${encodeURIComponent(p)}:${encodeURIComponent(c)}`;
-  const windowMs = deps.windowSeconds * 1e3;
-  const load = async (k) => {
-    try {
-      const v = await deps.cache.get(k);
-      if (!Array.isArray(v)) return [];
-      const cutoff = deps.now() - windowMs;
-      return v.filter(isEntry).filter((e) => e.at > cutoff);
-    } catch {
-      return [];
-    }
-  };
-  return {
-    async recordRead(principalId, clientId, org) {
-      if (!deps.enabled || deps.windowSeconds <= 0) return;
-      try {
-        const k = key(principalId, clientId);
-        const entries = (await load(k)).filter((e) => e.id !== org.id);
-        entries.unshift({ id: org.id, slug: org.slug, name: org.name, at: deps.now() });
-        await deps.cache.set(k, entries.slice(0, MAX_ENTRIES), deps.windowSeconds);
-      } catch {
-      }
-    },
-    async checkWrite(principalId, clientId, org) {
-      if (!deps.enabled || deps.windowSeconds <= 0) return null;
-      try {
-        const other = (await load(key(principalId, clientId))).filter((e) => e.id !== org.id).sort((a, b) => b.at - a.at)[0];
-        if (!other) return null;
-        return `Warning: this connection read ${other.name} (${other.slug}) ${ago(deps.now() - other.at)}. Confirm nothing from ${other.name} is in this write to ${org.name} (${org.slug}).`;
-      } catch {
-        return null;
-      }
-    }
-  };
+function conversationKey(source, options = {}) {
+  if (!source) return null;
+  const fromMeta = clean(source.meta?.["openai/session"]);
+  if (fromMeta) return fromMeta;
+  const headers = source.headers;
+  if (!headers) return null;
+  for (const name of options.codexHeaders ?? DEFAULT_CODEX_HEADERS) {
+    const v = readHeader(headers, name);
+    if (v) return v;
+  }
+  return readHeader(headers, options.siHeader ?? DEFAULT_SI_HEADER);
+}
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function hashConversationKey(key) {
+  return sha256Hex(key);
 }
 
 // src/server/errors.ts
@@ -237,14 +226,17 @@ var UserGoneError = class extends SiServerError {
 var SiUnavailableError = class extends SiServerError {
   reason;
   status;
-  constructor(reason, detail, status) {
+  /** From SI's `Retry-After` on a `429`, when present. */
+  retryAfterSeconds;
+  constructor(reason, detail, status, retryAfterSeconds2) {
     super(
       "si_unavailable",
-      `SI membership check unavailable (${reason}${status ? `, HTTP ${status}` : ""})${detail ? `: ${detail}` : ""}`,
+      `SI check unavailable (${reason}${status ? `, HTTP ${status}` : ""})${detail ? `: ${detail}` : ""}`,
       "Supreme Intelligence could not confirm your access right now. Try again in a moment."
     );
     this.reason = reason;
     this.status = status;
+    if (retryAfterSeconds2 !== void 0) this.retryAfterSeconds = retryAfterSeconds2;
   }
 };
 var MisconfiguredKeyError = class extends SiServerError {
@@ -277,12 +269,45 @@ var InvalidArgumentError = class extends SiServerError {
     super("invalid_argument", detail, detail);
   }
 };
+var InvalidTokenError = class extends SiServerError {
+  reason;
+  constructor(reason) {
+    super(
+      "invalid_token",
+      `Access token rejected (${reason})`,
+      reason === "missing" ? "This request needs a Supreme Intelligence access token." : "The access token is invalid or expired. Reconnect this app."
+    );
+    this.reason = reason;
+  }
+};
+var InsufficientScopeError = class extends SiServerError {
+  /** Every scope the operation needs (what goes in the challenge's `scope`). */
+  requiredScopes;
+  /** The required scopes the token doesn't have. */
+  missingScopes;
+  constructor(requiredScopes, missingScopes) {
+    super(
+      "insufficient_scope",
+      `Token lacks required scopes: ${missingScopes.join(" ")}`,
+      `This action needs more access than you granted this app (${missingScopes.join(", ")}). Reconnect and allow it.`
+    );
+    this.requiredScopes = [...requiredScopes];
+    this.missingScopes = [...missingScopes];
+  }
+};
+var SiValidationError = class extends SiServerError {
+  errors;
+  constructor(errors = {}) {
+    super("validation_failed", `SI rejected the request (422 validation_failed): ${JSON.stringify(errors)}`, "The request to Supreme Intelligence was rejected. Contact your administrator.");
+    this.errors = errors;
+  }
+};
 function isSiServerError(err) {
   return err instanceof SiServerError;
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.2.1";
+var SERVER_SDK_VERSION = "1.3.0";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
@@ -386,48 +411,6 @@ function jitter(random) {
   return 100 + Math.floor(random() * 200);
 }
 
-// src/server/locks.ts
-var DEFAULT_LOCK_TTL_SECONDS = 24 * 60 * 60;
-function lockKey(principalId, clientId, keyHash) {
-  return `si:lock:${encodeURIComponent(principalId)}:${encodeURIComponent(clientId)}:${keyHash}`;
-}
-function createLocks(store, ttlSeconds = DEFAULT_LOCK_TTL_SECONDS) {
-  const guard = async (fn) => {
-    try {
-      return await fn();
-    } catch (err) {
-      throw new LockStoreUnavailableError(err instanceof Error ? err.message : String(err));
-    }
-  };
-  const parse = (value) => {
-    const n = Number(value);
-    if (!Number.isInteger(n)) throw new LockStoreUnavailableError("lock store returned a non-numeric org id");
-    return n;
-  };
-  return {
-    async bindOrg({ principalId, clientId, keyHash, organizationId }) {
-      if (keyHash === null) return { mode: "soft", created: false };
-      const key = lockKey(principalId, clientId, keyHash);
-      const wanted = String(organizationId);
-      const existing = await guard(() => store.get(key));
-      if (existing !== null) {
-        const lockedId = parse(existing);
-        if (lockedId !== organizationId) throw new OrgLockedError({ id: lockedId }, { id: organizationId });
-        const touched = await guard(() => store.touch(key, ttlSeconds));
-        if (touched) return { mode: "locked", created: false };
-      }
-      const result = await guard(() => store.setIfAbsent(key, wanted, ttlSeconds));
-      const winner = parse(result.value);
-      if (winner !== organizationId) throw new OrgLockedError({ id: winner }, { id: organizationId });
-      return { mode: "locked", created: result.created };
-    },
-    async release({ principalId, clientId, keyHash }) {
-      if (keyHash === null) return;
-      await guard(() => store.delete(lockKey(principalId, clientId, keyHash)));
-    }
-  };
-}
-
 // src/server/membership.ts
 var MAX_ALLOW_TTL_SECONDS = 300;
 var MAX_DENY_TTL_SECONDS = 30;
@@ -442,6 +425,18 @@ function normalizeUserId(userId) {
 }
 var isInt = (v) => typeof v === "number" && Number.isInteger(v);
 var isStr = (v) => typeof v === "string";
+function parseOrganizations(value) {
+  if (!Array.isArray(value)) return null;
+  const organizations = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") return null;
+    const o = raw;
+    if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
+    if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+  }
+  return organizations;
+}
 function parseMembershipBody(body) {
   if (!body || typeof body !== "object") return null;
   const data = body.data;
@@ -452,15 +447,8 @@ function parseMembershipBody(body) {
   if (!user || !isInt(user.id)) return null;
   if (!app || !isInt(app.id) || !isStr(app.name)) return null;
   if (typeof d.is_superadmin !== "boolean") return null;
-  if (!Array.isArray(d.organizations)) return null;
-  const organizations = [];
-  for (const raw of d.organizations) {
-    if (!raw || typeof raw !== "object") return null;
-    const o = raw;
-    if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
-    if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
-  }
+  const organizations = parseOrganizations(d.organizations);
+  if (!organizations) return null;
   const meta = body.meta;
   return {
     user: { id: user.id },
@@ -469,6 +457,10 @@ function parseMembershipBody(body) {
     organizations,
     generatedAt: meta && isStr(meta.generated_at) ? meta.generated_at : ""
   };
+}
+function retryAfterSeconds(result, now) {
+  const ms = parseRetryAfter(result.headers.get("retry-after"), now);
+  return ms === null ? void 0 : Math.ceil(ms / 1e3);
 }
 function errorCode(result) {
   const body = result.body;
@@ -524,7 +516,7 @@ function createMembership(deps) {
         if (code === "user_not_found") return { v: 1, kind: "user_not_found", at: deps.now() };
         throw new SiUnavailableError("unexpected_status", code ?? "unknown 404", 404);
       case 429:
-        throw new SiUnavailableError("rate_limited", void 0, 429);
+        throw new SiUnavailableError("rate_limited", void 0, 429, retryAfterSeconds(result));
       default:
         if (result.status === 500 && code === "misconfigured_key") {
           throw new MisconfiguredKeyError("the key is not linked to an SI app (500 misconfigured_key)", 500);
@@ -591,40 +583,435 @@ function createMembership(deps) {
   };
 }
 
-// src/server/conversation.ts
-var DEFAULT_CODEX_HEADERS = ["x-codex-conversation-id", "x-codex-session-id"];
-var DEFAULT_SI_HEADER = "x-si-conversation";
-var MAX_KEY_LENGTH = 512;
-function clean(value) {
-  if (Array.isArray(value)) value = value[0];
-  if (typeof value !== "string") return null;
-  const v = value.trim();
-  if (!v || v.length > MAX_KEY_LENGTH) return null;
-  return v;
+// src/server/auth.ts
+var INTROSPECT_PATH = "/api/oauth/introspect";
+var GRANT_STATUS_PATH = "/api/oauth/grants/status";
+var PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+var MAX_INTROSPECTION_TTL_SECONDS = 60;
+var MAX_GRANT_STATUS_TTL_SECONDS = 60;
+var GRANT_STATUS_CHUNK_SIZE = 100;
+var MAX_BACKOFF_SECONDS = 60;
+var GRANT_STATUSES = ["active", "revoked", "expired", "unknown"];
+var verified = /* @__PURE__ */ new WeakSet();
+function isVerifiedPrincipal(value) {
+  return typeof value === "object" && value !== null && verified.has(value);
 }
-function readHeader(headers, name) {
-  if (typeof headers.get === "function") return clean(headers.get(name));
-  const lower = name.toLowerCase();
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === lower) return clean(v);
+function canonicalResourceUri(uri) {
+  if (typeof uri !== "string" || !uri.trim()) throw new InvalidArgumentError("resource must be an absolute URI");
+  if (uri.includes("#")) throw new InvalidArgumentError("resource must not have a fragment");
+  let url;
+  try {
+    url = new URL(uri.trim());
+  } catch {
+    throw new InvalidArgumentError("resource must be an absolute URI");
   }
-  return null;
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
+    throw new InvalidArgumentError("resource must use https (http is allowed for localhost only)");
+  }
+  const path = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+  return `${url.protocol}//${url.host}${path}${url.search}`;
 }
-function conversationKey(source, options = {}) {
-  if (!source) return null;
-  const fromMeta = clean(source.meta?.["openai/session"]);
-  if (fromMeta) return fromMeta;
-  const headers = source.headers;
+var quote = (v) => `"${v.replace(/["\\]/g, (c) => `\\${c}`)}"`;
+function bearerChallenge(params) {
+  const parts = [];
+  if (params.realm) parts.push(`realm=${quote(params.realm)}`);
+  if (params.error) parts.push(`error=${quote(params.error)}`);
+  if (params.errorDescription) parts.push(`error_description=${quote(params.errorDescription)}`);
+  const scope = typeof params.scope === "string" ? params.scope : params.scope?.join(" ");
+  if (scope) parts.push(`scope=${quote(scope)}`);
+  if (params.resourceMetadata) parts.push(`resource_metadata=${quote(params.resourceMetadata)}`);
+  return parts.length ? `Bearer ${parts.join(", ")}` : "Bearer";
+}
+function bearerToken(headers) {
   if (!headers) return null;
-  for (const name of options.codexHeaders ?? DEFAULT_CODEX_HEADERS) {
-    const v = readHeader(headers, name);
-    if (v) return v;
-  }
-  return readHeader(headers, options.siHeader ?? DEFAULT_SI_HEADER);
+  const value = readHeader(headers, "authorization");
+  const match = value ? /^Bearer\s+(\S+)$/i.exec(value) : null;
+  return match ? match[1] : null;
 }
-async function hashConversationKey(key) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+function requireScope(principal, scope) {
+  const required = (typeof scope === "string" ? [scope] : [...scope]).map((s) => s.trim()).filter(Boolean);
+  if (required.length === 0) throw new InvalidArgumentError("requireScope needs at least one scope");
+  const granted = new Set(Array.isArray(principal?.scope) ? principal.scope : []);
+  const missing = required.filter((s) => !granted.has(s));
+  if (missing.length) throw new InsufficientScopeError(required, missing);
+}
+var isStr2 = (v) => typeof v === "string";
+var isInt2 = (v) => typeof v === "number" && Number.isInteger(v);
+function parseActiveIntrospection(body) {
+  if (!body || typeof body !== "object") return null;
+  const b = body;
+  if (b.active !== true) return null;
+  if (!isStr2(b.sub) || !/^[1-9]\d{0,18}$/.test(b.sub)) return null;
+  if (!isStr2(b.aud) || !isStr2(b.iss) || !isStr2(b.client_id) || !b.client_id) return null;
+  if (!(b.client_name === null || isStr2(b.client_name))) return null;
+  if (!isStr2(b.scope) || !isStr2(b.grant_id) || !b.grant_id || !isStr2(b.requested_resource)) return null;
+  if (!isInt2(b.exp) || !isInt2(b.iat) || typeof b.is_superadmin !== "boolean") return null;
+  if (b.email !== void 0 && b.email !== null && !isStr2(b.email)) return null;
+  if (b.name !== void 0 && b.name !== null && !isStr2(b.name)) return null;
+  const organizations = parseOrganizations(b.organizations);
+  if (!organizations) return null;
+  const principal = {
+    sub: b.sub,
+    aud: b.aud,
+    scope: b.scope.split(/\s+/).filter(Boolean),
+    clientId: b.client_id,
+    clientName: b.client_name,
+    grantId: b.grant_id,
+    requestedResource: b.requested_resource,
+    isSuperadmin: b.is_superadmin,
+    organizations,
+    exp: b.exp,
+    iat: b.iat,
+    iss: b.iss
+  };
+  if (isStr2(b.email)) principal.email = b.email;
+  if (isStr2(b.name)) principal.name = b.name;
+  return principal;
+}
+function freezePrincipal(data, fromCache) {
+  const principal = Object.freeze({
+    ...data,
+    scope: Object.freeze([...data.scope]),
+    organizations: Object.freeze(data.organizations.map((o) => Object.freeze({ ...o, roles: Object.freeze([...o.roles]) }))),
+    fromCache
+  });
+  verified.add(principal);
+  return principal;
+}
+function createAuth(deps) {
+  const cfg = deps.config ?? {};
+  const introspectionTtl = clampTtl(cfg.introspectionTtlSeconds, MAX_INTROSPECTION_TTL_SECONDS);
+  const grantTtl = cfg.grantStatusTtlSeconds === void 0 ? 0 : clampTtl(cfg.grantStatusTtlSeconds, MAX_GRANT_STATUS_TTL_SECONDS);
+  const defaultResource = cfg.resource === void 0 ? void 0 : canonicalResourceUri(cfg.resource);
+  const issuer = cfg.issuer ?? deps.baseUrl;
+  const inflight = /* @__PURE__ */ new Map();
+  let blockedUntil = 0;
+  const resourceFor = (override) => {
+    if (override !== void 0) return canonicalResourceUri(override);
+    if (defaultResource === void 0) {
+      throw new InvalidArgumentError("no resource configured: set auth.resource or pass { resource } (your canonical MCP resource URI)");
+    }
+    return defaultResource;
+  };
+  const checkBackoff = () => {
+    const remaining = blockedUntil - deps.now();
+    if (remaining > 0) {
+      throw new SiUnavailableError("rate_limited", "backing off after 429 (Retry-After)", 429, Math.ceil(remaining / 1e3));
+    }
+  };
+  const fail = (result) => {
+    const code = errorCode(result);
+    switch (result.status) {
+      case 401:
+        throw new MisconfiguredKeyError("SI rejected the membership key (401)", 401);
+      case 403:
+        if (code === "app_inactive") throw new AppInactiveError();
+        throw new SiUnavailableError("unexpected_status", code, 403);
+      case 422: {
+        const errors = result.body?.errors;
+        throw new SiValidationError(errors && typeof errors === "object" ? errors : {});
+      }
+      case 429: {
+        const retryAfter = retryAfterSeconds(result, deps.now());
+        if (retryAfter !== void 0 && retryAfter > 0) {
+          blockedUntil = Math.max(blockedUntil, deps.now() + Math.min(retryAfter, MAX_BACKOFF_SECONDS) * 1e3);
+        }
+        throw new SiUnavailableError("rate_limited", void 0, 429, retryAfter);
+      }
+      default: {
+        if (result.status === 500 && code === "misconfigured_key") {
+          const message = result.body?.message;
+          throw new MisconfiguredKeyError(`500 misconfigured_key${isStr2(message) ? `: ${message}` : ""}`, 500);
+        }
+        if (result.status >= 500) throw new SiUnavailableError("server_error", code, result.status);
+        throw new SiUnavailableError("unexpected_status", code, result.status);
+      }
+    }
+  };
+  const accept = (data, resource) => {
+    let aud;
+    try {
+      aud = canonicalResourceUri(data.aud);
+    } catch {
+      throw new InvalidTokenError("audience_mismatch");
+    }
+    if (aud !== resource) {
+      deps.logger.warn("[si-sdk/server] introspection: SI answered active for another audience; rejected", { aud: data.aud, expected: resource });
+      throw new InvalidTokenError("audience_mismatch");
+    }
+    if (data.exp * 1e3 <= deps.now()) throw new InvalidTokenError("expired");
+  };
+  const readCached = async (key) => {
+    try {
+      const v = await deps.cache.get(key);
+      if (!v || typeof v !== "object" || v.v !== 1 || typeof v.at !== "number" || typeof v.ttlMs !== "number") return null;
+      const age = deps.now() - v.at;
+      if (age < 0 || age >= Math.min(v.ttlMs, introspectionTtl * 1e3)) return null;
+      return parseActiveIntrospection(v.body);
+    } catch {
+      return null;
+    }
+  };
+  const fetchActive = async (token, key) => {
+    checkBackoff();
+    const result = await deps.http({
+      method: "POST",
+      path: INTROSPECT_PATH,
+      body: { token },
+      noRetryOn: (r) => errorCode(r) === "misconfigured_key"
+    });
+    if (result.status !== 200) return fail(result);
+    const body = result.body;
+    if (body && typeof body === "object" && body.active === false) throw new InvalidTokenError("inactive");
+    const data = parseActiveIntrospection(body);
+    if (!data) throw new SiUnavailableError("malformed_response", "introspection body did not match the contract", 200);
+    const ttlSeconds = Math.min(introspectionTtl, Math.floor((data.exp * 1e3 - deps.now()) / 1e3));
+    if (ttlSeconds > 0) {
+      const entry = { v: 1, at: deps.now(), ttlMs: ttlSeconds * 1e3, body };
+      try {
+        await deps.cache.set(key, entry, ttlSeconds);
+      } catch {
+      }
+    }
+    return data;
+  };
+  const introspect = async (bearer, options = {}) => {
+    const raw = typeof bearer === "string" ? bearer.trim().replace(/^Bearer(\s+|$)/i, "").trim() : "";
+    if (!raw) throw new InvalidTokenError("missing");
+    const resource = resourceFor(options.resource);
+    const key = `si:i:${await sha256Hex(raw)}`;
+    const cached = await readCached(key);
+    if (cached) {
+      accept(cached, resource);
+      return freezePrincipal(cached, true);
+    }
+    let pending = inflight.get(key);
+    if (!pending) {
+      pending = fetchActive(raw, key).finally(() => inflight.delete(key));
+      inflight.set(key, pending);
+    }
+    const data = await pending;
+    accept(data, resource);
+    return freezePrincipal(data, false);
+  };
+  const grantStatus = async (grantIds) => {
+    if (!Array.isArray(grantIds)) throw new InvalidArgumentError("grantIds must be an array of grant ids");
+    const ids = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const id of grantIds) {
+      if (typeof id !== "string" || !id || id.length > 64) throw new InvalidArgumentError("each grant id must be a non-empty string of at most 64 characters");
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+    const out = /* @__PURE__ */ new Map();
+    const pending = [];
+    for (const id of ids) {
+      if (grantTtl > 0) {
+        try {
+          const v = await deps.cache.get(`si:g:${id}`);
+          const age = v && v.v === 1 && v.status === "active" ? deps.now() - v.at : -1;
+          if (v && age >= 0 && age < Math.min(v.ttlMs, grantTtl * 1e3)) {
+            out.set(id, "active");
+            continue;
+          }
+        } catch {
+        }
+      }
+      pending.push(id);
+    }
+    for (let i = 0; i < pending.length; i += GRANT_STATUS_CHUNK_SIZE) {
+      const chunk = pending.slice(i, i + GRANT_STATUS_CHUNK_SIZE);
+      checkBackoff();
+      const result = await deps.http({
+        method: "POST",
+        path: GRANT_STATUS_PATH,
+        body: { grant_ids: chunk },
+        noRetryOn: (r) => errorCode(r) === "misconfigured_key"
+      });
+      if (result.status !== 200) fail(result);
+      const body = result.body;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        throw new SiUnavailableError("malformed_response", "grant status body is not an object", 200);
+      }
+      for (const id of chunk) {
+        const status = Object.prototype.hasOwnProperty.call(body, id) ? body[id] : void 0;
+        if (!GRANT_STATUSES.includes(status)) {
+          throw new SiUnavailableError("malformed_response", "grant status missing or unknown for a requested id", 200);
+        }
+        out.set(id, status);
+        if (status === "active" && grantTtl > 0) {
+          const entry = { v: 1, at: deps.now(), ttlMs: grantTtl * 1e3, status: "active" };
+          try {
+            await deps.cache.set(`si:g:${id}`, entry, grantTtl);
+          } catch {
+          }
+        }
+      }
+    }
+    return Object.fromEntries(ids.map((id) => [id, out.get(id)]));
+  };
+  const queryOf = (requestUrl) => {
+    if (requestUrl === void 0) return "";
+    try {
+      return new URL(requestUrl).search;
+    } catch {
+      throw new InvalidArgumentError("requestUrl must be an absolute URL");
+    }
+  };
+  const baseResource = () => {
+    const r = new URL(resourceFor());
+    return { origin: `${r.protocol}//${r.host}`, path: r.pathname === "/" ? "" : r.pathname, query: r.search };
+  };
+  const protectedResourceMetadata = (requestUrl) => {
+    const { origin, path, query } = baseResource();
+    const resource = `${origin}${path}${queryOf(requestUrl) || query}`;
+    const doc = {
+      resource,
+      authorization_servers: [issuer],
+      bearer_methods_supported: ["header"]
+    };
+    if (cfg.scopesSupported?.length) doc.scopes_supported = [...cfg.scopesSupported];
+    if (cfg.resourceName) doc.resource_name = cfg.resourceName;
+    if (cfg.resourceDocumentation) doc.resource_documentation = cfg.resourceDocumentation;
+    if (cfg.logoUri) doc.logo_uri = cfg.logoUri;
+    return doc;
+  };
+  const resourceMetadataUrl = (requestUrl) => {
+    const { origin, path, query } = baseResource();
+    return `${origin}${PROTECTED_RESOURCE_METADATA_PATH}${path}${queryOf(requestUrl) || query}`;
+  };
+  const challenge = (err, options = {}) => {
+    const json = { "Content-Type": "application/json" };
+    const metadata = () => options.resourceMetadataUrl ?? resourceMetadataUrl(options.requestUrl);
+    if (err instanceof InvalidTokenError) {
+      const error = err.reason === "missing" ? void 0 : "invalid_token";
+      return {
+        status: 401,
+        headers: { ...json, "WWW-Authenticate": bearerChallenge({ error, resourceMetadata: metadata() }) },
+        body: { error: error ?? "unauthorized", error_description: err.publicMessage }
+      };
+    }
+    if (err instanceof InsufficientScopeError) {
+      return {
+        status: 403,
+        headers: {
+          ...json,
+          "WWW-Authenticate": bearerChallenge({ error: "insufficient_scope", scope: err.requiredScopes, resourceMetadata: metadata() })
+        },
+        body: { error: "insufficient_scope", error_description: err.publicMessage }
+      };
+    }
+    if (isSiServerError(err)) {
+      const headers = { ...json };
+      if (err instanceof SiUnavailableError && err.retryAfterSeconds !== void 0) headers["Retry-After"] = String(err.retryAfterSeconds);
+      return { status: 503, headers, body: { error: "temporarily_unavailable", error_description: err.publicMessage } };
+    }
+    return { status: 500, headers: json, body: { error: "server_error", error_description: "Unexpected error." } };
+  };
+  return {
+    introspect,
+    grantStatus,
+    requireScope,
+    protectedResourceMetadata,
+    resourceMetadataUrl,
+    challenge,
+    bearerToken
+  };
+}
+
+// src/server/detection.ts
+var DEFAULT_DETECTION_WINDOW_SECONDS = 15 * 60;
+var MAX_ENTRIES = 20;
+function isEntry(v) {
+  if (!v || typeof v !== "object") return false;
+  const e = v;
+  return typeof e.id === "number" && typeof e.slug === "string" && typeof e.name === "string" && typeof e.at === "number";
+}
+function ago(ms) {
+  const min = Math.floor(ms / 6e4);
+  if (min < 1) return "less than a minute ago";
+  return min === 1 ? "1 min ago" : `${min} min ago`;
+}
+function createDetection(deps) {
+  const key = (p, c) => `si:d:${encodeURIComponent(p)}:${encodeURIComponent(c)}`;
+  const windowMs = deps.windowSeconds * 1e3;
+  const load = async (k) => {
+    try {
+      const v = await deps.cache.get(k);
+      if (!Array.isArray(v)) return [];
+      const cutoff = deps.now() - windowMs;
+      return v.filter(isEntry).filter((e) => e.at > cutoff);
+    } catch {
+      return [];
+    }
+  };
+  return {
+    async recordRead(principalId, clientId, org) {
+      if (!deps.enabled || deps.windowSeconds <= 0) return;
+      try {
+        const k = key(principalId, clientId);
+        const entries = (await load(k)).filter((e) => e.id !== org.id);
+        entries.unshift({ id: org.id, slug: org.slug, name: org.name, at: deps.now() });
+        await deps.cache.set(k, entries.slice(0, MAX_ENTRIES), deps.windowSeconds);
+      } catch {
+      }
+    },
+    async checkWrite(principalId, clientId, org) {
+      if (!deps.enabled || deps.windowSeconds <= 0) return null;
+      try {
+        const other = (await load(key(principalId, clientId))).filter((e) => e.id !== org.id).sort((a, b) => b.at - a.at)[0];
+        if (!other) return null;
+        return `Warning: this connection read ${other.name} (${other.slug}) ${ago(deps.now() - other.at)}. Confirm nothing from ${other.name} is in this write to ${org.name} (${org.slug}).`;
+      } catch {
+        return null;
+      }
+    }
+  };
+}
+
+// src/server/locks.ts
+var DEFAULT_LOCK_TTL_SECONDS = 24 * 60 * 60;
+function lockKey(principalId, clientId, keyHash) {
+  return `si:lock:${encodeURIComponent(principalId)}:${encodeURIComponent(clientId)}:${keyHash}`;
+}
+function createLocks(store, ttlSeconds = DEFAULT_LOCK_TTL_SECONDS) {
+  const guard = async (fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw new LockStoreUnavailableError(err instanceof Error ? err.message : String(err));
+    }
+  };
+  const parse = (value) => {
+    const n = Number(value);
+    if (!Number.isInteger(n)) throw new LockStoreUnavailableError("lock store returned a non-numeric org id");
+    return n;
+  };
+  return {
+    async bindOrg({ principalId, clientId, keyHash, organizationId }) {
+      if (keyHash === null) return { mode: "soft", created: false };
+      const key = lockKey(principalId, clientId, keyHash);
+      const wanted = String(organizationId);
+      const existing = await guard(() => store.get(key));
+      if (existing !== null) {
+        const lockedId = parse(existing);
+        if (lockedId !== organizationId) throw new OrgLockedError({ id: lockedId }, { id: organizationId });
+        const touched = await guard(() => store.touch(key, ttlSeconds));
+        if (touched) return { mode: "locked", created: false };
+      }
+      const result = await guard(() => store.setIfAbsent(key, wanted, ttlSeconds));
+      const winner = parse(result.value);
+      if (winner !== organizationId) throw new OrgLockedError({ id: winner }, { id: organizationId });
+      return { mode: "locked", created: result.created };
+    },
+    async release({ principalId, clientId, keyHash }) {
+      if (keyHash === null) return;
+      await guard(() => store.delete(lockKey(principalId, clientId, keyHash)));
+    }
+  };
 }
 
 // src/server/mcp.ts
@@ -649,16 +1036,19 @@ function errorResult(err) {
 }
 function createMcp(deps) {
   const scopeToolCall = async (input) => {
-    const clientId = typeof input.clientId === "string" ? input.clientId.trim() : "";
+    const principal = input.principal;
+    const userId = principal !== void 0 && input.userId === void 0 && isVerifiedPrincipal(principal) ? principal.sub : input.userId;
+    const rawClientId = input.clientId ?? (principal !== void 0 && isVerifiedPrincipal(principal) ? principal.clientId : void 0);
+    const clientId = typeof rawClientId === "string" ? rawClientId.trim() : "";
     const tool = typeof input.tool === "string" ? input.tool.trim() : "";
-    const principalId = (input.principalId ?? String(input.userId)).trim();
+    const principalId = (input.principalId ?? String(userId)).trim();
     const kind = input.kind === "read" ? "read" : "write";
     const key = typeof input.conversationKey === "string" && input.conversationKey.trim() ? input.conversationKey.trim() : null;
     const mode = key ? "locked" : "soft";
     let keyHash = null;
     let organizationId = null;
     const audit = (outcome) => deps.audit.emit({
-      principalId: principalId || String(input.userId),
+      principalId: principalId || String(userId),
       clientId,
       mode,
       keyHash,
@@ -669,11 +1059,20 @@ function createMcp(deps) {
       occurredAt: new Date(deps.now()).toISOString()
     });
     try {
+      if (principal !== void 0) {
+        if (!isVerifiedPrincipal(principal)) throw new InvalidArgumentError("principal must be the object returned by si.auth.introspect");
+        if (input.userId !== void 0 && String(input.userId).trim() !== principal.sub) {
+          throw new InvalidArgumentError("userId does not match principal.sub");
+        }
+        if (principal.exp * 1e3 <= deps.now()) throw new InvalidTokenError("expired");
+      } else if (userId === void 0) {
+        throw new InvalidArgumentError("userId or principal is required");
+      }
       if (!clientId) throw new InvalidArgumentError("clientId is required");
       if (!tool) throw new InvalidArgumentError("tool is required");
       if (!principalId) throw new InvalidArgumentError("principalId must not be empty");
       if (key) keyHash = await hashConversationKey(key);
-      const org = await deps.organizations.resolve(input.userId, input.organization);
+      const org = await deps.organizations.resolve(principal ?? userId, input.organization);
       organizationId = org.id;
       try {
         await deps.locks.bindOrg({ principalId, clientId, keyHash, organizationId: org.id });
@@ -682,8 +1081,8 @@ function createMcp(deps) {
           const lockedId = err.lockedOrganization.id;
           let locked = { id: lockedId };
           try {
-            const m = await deps.membership.get(input.userId);
-            const o = m.organizations.find((x) => x.id === lockedId);
+            const orgs = principal ? principal.organizations : (await deps.membership.get(userId)).organizations;
+            const o = orgs.find((x) => x.id === lockedId);
             if (o) locked = { id: o.id, slug: o.slug, name: o.name };
           } catch {
           }
@@ -703,7 +1102,7 @@ function createMcp(deps) {
         mode,
         keyHash,
         warning,
-        userId: String(input.userId),
+        userId: String(userId),
         principalId,
         clientId,
         tool,
@@ -722,18 +1121,27 @@ function createMcp(deps) {
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: annotations.read
     },
-    async handler({ userId }) {
+    async handler({ userId, principal }) {
       try {
-        const m = await deps.membership.get(userId);
+        let organizations;
+        if (principal !== void 0) {
+          if (!isVerifiedPrincipal(principal)) throw new InvalidArgumentError("principal must be the object returned by si.auth.introspect");
+          if (principal.exp * 1e3 <= deps.now()) throw new InvalidTokenError("expired");
+          organizations = principal.organizations;
+        } else if (userId !== void 0) {
+          organizations = (await deps.membership.get(userId)).organizations;
+        } else {
+          throw new InvalidArgumentError("userId or principal is required");
+        }
         const payload = {
-          data: m.organizations.map((o) => ({
+          data: organizations.map((o) => ({
             organization_id: o.id,
             slug: o.slug,
             name: o.name,
             roles: [...o.roles],
             app_grant: o.appGrant
           })),
-          meta: { count: m.organizations.length }
+          meta: { count: organizations.length }
         };
         return { content: [{ type: "text", text: JSON.stringify(payload) }] };
       } catch (err) {
@@ -752,19 +1160,27 @@ function createMcp(deps) {
 }
 
 // src/server/organizations.ts
+function organizationMatcher(organization) {
+  const raw = typeof organization === "number" ? String(organization) : typeof organization === "string" ? organization.trim() : "";
+  if (!raw || raw.length > 200) throw new InvalidArgumentError("organization must be an org slug or numeric id");
+  if (/^\d+$/.test(raw)) {
+    const id = Number(raw);
+    return { raw, match: (o) => o.id === id };
+  }
+  const slug = raw.toLowerCase();
+  return { raw, match: (o) => o.slug.toLowerCase() === slug };
+}
 function createOrganizations(membership) {
   return {
-    async resolve(userId, organization) {
-      const raw = typeof organization === "number" ? String(organization) : typeof organization === "string" ? organization.trim() : "";
-      if (!raw || raw.length > 200) throw new InvalidArgumentError("organization must be an org slug or numeric id");
-      const match = /^\d+$/.test(raw) ? (() => {
-        const id = Number(raw);
-        return (o) => o.id === id;
-      })() : (() => {
-        const slug = raw.toLowerCase();
-        return (o) => o.slug.toLowerCase() === slug;
-      })();
-      const { organization: org } = await membership.findOrganization(userId, match);
+    async resolve(user, organization) {
+      const { raw, match } = organizationMatcher(organization);
+      if (typeof user === "object" && user !== null) {
+        if (!isVerifiedPrincipal(user)) throw new InvalidArgumentError("principal must be the object returned by si.auth.introspect");
+        const org2 = user.organizations.find(match);
+        if (!org2) throw new OrgAccessDeniedError(raw);
+        return { ...org2, roles: [...org2.roles] };
+      }
+      const { organization: org } = await membership.findOrganization(user, match);
       if (!org) throw new OrgAccessDeniedError(raw);
       return org;
     }
@@ -822,6 +1238,15 @@ function createSiServerClient(config) {
     denyTtlSeconds: clampTtl(config.membership?.denyTtlSeconds, MAX_DENY_TTL_SECONDS)
   });
   const organizations = createOrganizations(membership);
+  const auth = createAuth({
+    http,
+    logger,
+    now,
+    baseUrl,
+    config: config.auth,
+    // Separate by default: principals carry email, so they stay in process unless the app opts in.
+    cache: config.auth?.cache ?? memoryCache({ now })
+  });
   const locks = createLocks(lockStore, config.lockTtlSeconds && config.lockTtlSeconds > 0 ? config.lockTtlSeconds : DEFAULT_LOCK_TTL_SECONDS);
   const detection = createDetection({
     cache,
@@ -831,7 +1256,7 @@ function createSiServerClient(config) {
   });
   const audit = createAudit({ http, logger, onAudit: config.onAudit, forwarding: config.auditForwarding });
   const mcp = createMcp({ membership, organizations, locks, detection, audit, logger, now, conversation: config.conversation });
-  return { membership, organizations, locks, detection, audit, mcp };
+  return { auth, membership, organizations, locks, detection, audit, mcp };
 }
 
 // src/server/adapters/supabase.ts
@@ -961,27 +1386,41 @@ export {
   DEFAULT_DETECTION_WINDOW_SECONDS,
   DEFAULT_LOCK_TTL_SECONDS,
   DEFAULT_SI_HEADER,
+  GRANT_STATUS_CHUNK_SIZE,
+  GRANT_STATUS_PATH,
+  INTROSPECT_PATH,
+  InsufficientScopeError,
   InvalidArgumentError,
+  InvalidTokenError,
   LockStoreUnavailableError,
   MAX_ALLOW_TTL_SECONDS,
   MAX_DENY_TTL_SECONDS,
+  MAX_GRANT_STATUS_TTL_SECONDS,
+  MAX_INTROSPECTION_TTL_SECONDS,
   MisconfiguredKeyError,
   OrgAccessDeniedError,
   OrgLockedError,
+  PROTECTED_RESOURCE_METADATA_PATH,
   SERVER_SDK_VERSION,
   SUPABASE_LOCK_STORE_SQL,
   SiServerError,
   SiUnavailableError,
+  SiValidationError,
   UserGoneError,
   annotations,
+  bearerChallenge,
+  bearerToken,
+  canonicalResourceUri,
   conversationKey,
   createSiServerClient,
   errorResult,
   hashConversationKey,
   isSiServerError,
+  isVerifiedPrincipal,
   labelResult,
   memoryCache,
   memoryLockStore,
   orgBanner,
+  requireScope,
   supabaseLockStore
 };

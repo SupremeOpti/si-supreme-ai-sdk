@@ -14,7 +14,10 @@ export type SiServerErrorCode =
   | 'misconfigured_key'
   | 'app_inactive'
   | 'lock_store_unavailable'
-  | 'invalid_argument';
+  | 'invalid_argument'
+  | 'invalid_token'
+  | 'insufficient_scope'
+  | 'validation_failed';
 
 export class SiServerError extends Error {
   readonly code: SiServerErrorCode;
@@ -93,15 +96,18 @@ export type SiUnavailableReason =
 export class SiUnavailableError extends SiServerError {
   readonly reason: SiUnavailableReason;
   readonly status?: number;
+  /** From SI's `Retry-After` on a `429`, when present. */
+  readonly retryAfterSeconds?: number;
 
-  constructor(reason: SiUnavailableReason, detail?: string, status?: number) {
+  constructor(reason: SiUnavailableReason, detail?: string, status?: number, retryAfterSeconds?: number) {
     super(
       'si_unavailable',
-      `SI membership check unavailable (${reason}${status ? `, HTTP ${status}` : ''})${detail ? `: ${detail}` : ''}`,
+      `SI check unavailable (${reason}${status ? `, HTTP ${status}` : ''})${detail ? `: ${detail}` : ''}`,
       'Supreme Intelligence could not confirm your access right now. Try again in a moment.'
     );
     this.reason = reason;
     this.status = status;
+    if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -141,6 +147,66 @@ export class LockStoreUnavailableError extends SiServerError {
 export class InvalidArgumentError extends SiServerError {
   constructor(detail: string) {
     super('invalid_argument', detail, detail);
+  }
+}
+
+export type InvalidTokenReason =
+  /** No bearer token on the request. */
+  | 'missing'
+  /** SI answered `{"active": false}`. */
+  | 'inactive'
+  /** SI said active, but `aud` isn't this app's resource. */
+  | 'audience_mismatch'
+  /** `exp` is in the past by the local clock. */
+  | 'expired';
+
+/**
+ * The bearer token can't be used here. Answer the MCP client `401` with
+ * `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="…"`
+ * (`si.auth.challenge(err)` builds it).
+ */
+export class InvalidTokenError extends SiServerError {
+  readonly reason: InvalidTokenReason;
+
+  constructor(reason: InvalidTokenReason) {
+    super(
+      'invalid_token',
+      `Access token rejected (${reason})`,
+      reason === 'missing' ? 'This request needs a Supreme Intelligence access token.' : 'The access token is invalid or expired. Reconnect this app.'
+    );
+    this.reason = reason;
+  }
+}
+
+/**
+ * The token is valid but lacks a scope the operation needs. Answer `403`
+ * with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`,
+ * listing **every** scope the operation needs so the client can step up.
+ */
+export class InsufficientScopeError extends SiServerError {
+  /** Every scope the operation needs (what goes in the challenge's `scope`). */
+  readonly requiredScopes: string[];
+  /** The required scopes the token doesn't have. */
+  readonly missingScopes: string[];
+
+  constructor(requiredScopes: string[], missingScopes: string[]) {
+    super(
+      'insufficient_scope',
+      `Token lacks required scopes: ${missingScopes.join(' ')}`,
+      `This action needs more access than you granted this app (${missingScopes.join(', ')}). Reconnect and allow it.`
+    );
+    this.requiredScopes = [...requiredScopes];
+    this.missingScopes = [...missingScopes];
+  }
+}
+
+/** SI answered `422 validation_failed`: the SDK sent a request SI rejects. Always a deny. */
+export class SiValidationError extends SiServerError {
+  readonly errors: Record<string, unknown>;
+
+  constructor(errors: Record<string, unknown> = {}) {
+    super('validation_failed', `SI rejected the request (422 validation_failed): ${JSON.stringify(errors)}`, 'The request to Supreme Intelligence was rejected. Contact your administrator.');
+    this.errors = errors;
   }
 }
 

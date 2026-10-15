@@ -1,5 +1,6 @@
 import { memoryCache, memoryLockStore } from './adapters/memory';
 import { createAudit, type AuditApi } from './audit';
+import { createAuth, type AuthApi } from './auth';
 import { createDetection, DEFAULT_DETECTION_WINDOW_SECONDS, type DetectionApi } from './detection';
 import { MisconfiguredKeyError, InvalidArgumentError } from './errors';
 import { createHttp } from './http';
@@ -10,6 +11,8 @@ import { createOrganizations, type OrganizationsApi } from './organizations';
 import type { Logger, SiServerConfig } from './types';
 
 export interface SiServerClient {
+  /** Token introspection, grant status, scope checks and protected-resource metadata. */
+  auth: AuthApi;
   membership: MembershipApi;
   organizations: OrganizationsApi;
   locks: LocksApi;
@@ -77,6 +80,15 @@ export function createSiServerClient(config: SiServerConfig): SiServerClient {
     denyTtlSeconds: clampTtl(config.membership?.denyTtlSeconds, MAX_DENY_TTL_SECONDS),
   });
   const organizations = createOrganizations(membership);
+  const auth = createAuth({
+    http,
+    logger,
+    now,
+    baseUrl,
+    config: config.auth,
+    // Separate by default: principals carry email, so they stay in process unless the app opts in.
+    cache: config.auth?.cache ?? memoryCache({ now }),
+  });
   const locks = createLocks(lockStore, config.lockTtlSeconds && config.lockTtlSeconds > 0 ? config.lockTtlSeconds : DEFAULT_LOCK_TTL_SECONDS);
   const detection = createDetection({
     cache,
@@ -87,5 +99,5 @@ export function createSiServerClient(config: SiServerConfig): SiServerClient {
   const audit = createAudit({ http, logger, onAudit: config.onAudit, forwarding: config.auditForwarding });
   const mcp = createMcp({ membership, organizations, locks, detection, audit, logger, now, conversation: config.conversation });
 
-  return { membership, organizations, locks, detection, audit, mcp };
+  return { auth, membership, organizations, locks, detection, audit, mcp };
 }

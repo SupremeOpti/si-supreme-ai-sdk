@@ -23,7 +23,7 @@ function clean(value: unknown): string | null {
   return v;
 }
 
-function readHeader(headers: HeadersInput, name: string): string | null {
+export function readHeader(headers: HeadersInput, name: string): string | null {
   if (typeof (headers as HeadersLike).get === 'function') return clean((headers as HeadersLike).get(name));
   const lower = name.toLowerCase();
   for (const [k, v] of Object.entries(headers as Record<string, unknown>)) {
@@ -52,8 +52,13 @@ export function conversationKey(source: ConversationKeySource | null | undefined
   return readHeader(headers, options.siHeader ?? DEFAULT_SI_HEADER);
 }
 
+/** SHA-256 hex of a string (Web Crypto). */
+export async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** SHA-256 hex of a conversation key. Only the hash is stored or forwarded. */
 export async function hashConversationKey(key: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  return sha256Hex(key);
 }

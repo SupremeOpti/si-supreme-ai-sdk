@@ -7,7 +7,7 @@ import {
   SiUnavailableError,
   UserGoneError,
 } from './errors';
-import type { HttpClient, HttpResult } from './http';
+import { parseRetryAfter, type HttpClient, type HttpResult } from './http';
 import type { Logger, Membership, MembershipOrganization, ResolvedOrganization } from './types';
 
 export const MAX_ALLOW_TTL_SECONDS = 300;
@@ -55,6 +55,23 @@ export function normalizeUserId(userId: number | string): string {
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
 const isStr = (v: unknown): v is string => typeof v === 'string';
 
+/**
+ * Validate SI's `organizations` array (`{id, slug, name, roles, app_grant}`
+ * items), shared by membership and introspection. Anything unexpected → null.
+ */
+export function parseOrganizations(value: unknown): MembershipOrganization[] | null {
+  if (!Array.isArray(value)) return null;
+  const organizations: MembershipOrganization[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') return null;
+    const o = raw as Record<string, unknown>;
+    if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
+    if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+  }
+  return organizations;
+}
+
 /** Validate SI's 200 body. Anything unexpected → null (caller fails closed). */
 export function parseMembershipBody(body: unknown): Omit<Membership, 'fromCache'> | null {
   if (!body || typeof body !== 'object') return null;
@@ -66,16 +83,8 @@ export function parseMembershipBody(body: unknown): Omit<Membership, 'fromCache'
   if (!user || !isInt(user.id)) return null;
   if (!app || !isInt(app.id) || !isStr(app.name)) return null;
   if (typeof d.is_superadmin !== 'boolean') return null;
-  if (!Array.isArray(d.organizations)) return null;
-
-  const organizations: MembershipOrganization[] = [];
-  for (const raw of d.organizations) {
-    if (!raw || typeof raw !== 'object') return null;
-    const o = raw as Record<string, unknown>;
-    if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
-    if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
-  }
+  const organizations = parseOrganizations(d.organizations);
+  if (!organizations) return null;
 
   const meta = (body as { meta?: Record<string, unknown> }).meta;
   return {
@@ -87,7 +96,13 @@ export function parseMembershipBody(body: unknown): Omit<Membership, 'fromCache'
   };
 }
 
-function errorCode(result: HttpResult): string | undefined {
+/** SI's `Retry-After` in whole seconds, if it sent one. */
+export function retryAfterSeconds(result: HttpResult, now?: number): number | undefined {
+  const ms = parseRetryAfter(result.headers.get('retry-after'), now);
+  return ms === null ? undefined : Math.ceil(ms / 1000);
+}
+
+export function errorCode(result: HttpResult): string | undefined {
   const body = result.body as { error?: unknown } | undefined;
   return body && typeof body === 'object' && isStr(body.error) ? body.error : undefined;
 }
@@ -149,7 +164,7 @@ export function createMembership(deps: MembershipDeps): MembershipApi {
         if (code === 'user_not_found') return { v: 1, kind: 'user_not_found', at: deps.now() };
         throw new SiUnavailableError('unexpected_status', code ?? 'unknown 404', 404);
       case 429:
-        throw new SiUnavailableError('rate_limited', undefined, 429);
+        throw new SiUnavailableError('rate_limited', undefined, 429, retryAfterSeconds(result));
       default:
         if (result.status === 500 && code === 'misconfigured_key') {
           throw new MisconfiguredKeyError('the key is not linked to an SI app (500 misconfigured_key)', 500);
