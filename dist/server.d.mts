@@ -698,4 +698,115 @@ declare const SUPABASE_LOCK_STORE_SQL = "-- @supreme-ai/si-sdk/server: conversat
  */
 declare function supabaseLockStore(client: SupabaseRpcClient, options?: SupabaseLockStoreOptions): LockStoreAdapter;
 
-export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, annotations, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore };
+/** JSON Schema subset the hub and the SDK both understand. Always `type: 'object'` at the top. */
+type JsonSchema = Record<string, unknown>;
+/** Who the hub says is running the step. Comes from the verified service token only. */
+interface SiActionContext {
+    organizationId: number;
+    organizationSlug: string | null;
+    userId: number;
+    workflowId: number | null;
+    runId: number | null;
+    nodeId: string | null;
+    attempt: number;
+    /** `X-SI-Idempotency-Key`: stable for one step of one run across retries. */
+    idempotencyKey: string | null;
+}
+interface SiActionAnnotations {
+    readOnlyHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+}
+interface SiActionDefinition<I = Record<string, unknown>, O = Record<string, unknown>> {
+    /** `^[a-z0-9_]{1,48}$`. Append-only: never rename a shipped id. */
+    id: string;
+    name: string;
+    /** Read by the hub's AI to decide when to use the action. Say what it does, what it needs and what it returns. */
+    description: string;
+    inputSchema: JsonSchema;
+    outputSchema: JsonSchema;
+    annotations?: SiActionAnnotations;
+    /** Defaults: typical 10s, max 120s. Sync actions must answer within the hub's timeout. */
+    execution?: {
+        typicalSeconds?: number;
+        maxSeconds?: number;
+    };
+    examples?: Array<{
+        input?: Record<string, unknown>;
+        output?: Record<string, unknown>;
+    }>;
+    handler(input: I, context: SiActionContext): Promise<O>;
+}
+interface SiActionsConfig {
+    /** App slug as registered in SI, e.g. `data-library`. Tokens must be issued for this app. */
+    app: string;
+    /** Public origin the hub calls, e.g. `https://library.supremegroup.ai`. Goes into the manifest as `base_url`. */
+    baseUrl: string;
+    /** SI hub origin that verifies service tokens, e.g. `https://app.supremegroup.ai`. */
+    hubUrl: string;
+    actions: SiActionDefinition<any, any>[];
+    /** Default `supreme-intelligence`. */
+    issuer?: string;
+    /** Default `si-actions`. */
+    audience?: string;
+    fetch?: FetchLike;
+    logger?: Logger;
+    now?: () => number;
+}
+/** Minimal request shape: the runtime's real `Request` fits. */
+interface SiActionRequest {
+    readonly method: string;
+    readonly url: string;
+    readonly headers: {
+        get(name: string): string | null;
+    };
+    text(): Promise<string>;
+}
+/** Plain response the adapter turns into the runtime's `Response`. */
+interface SiActionResponse {
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+}
+type SiActionErrorCode = 'bad_request' | 'unauthenticated' | 'org_not_authorized' | 'unknown_action' | 'unknown_job' | 'validation_failed' | 'internal_error' | 'upstream_unavailable';
+
+/** Throw from a handler to answer with a contract error instead of a 500. */
+declare class SiActionError extends Error {
+    readonly code: SiActionErrorCode;
+    readonly status: number;
+    readonly retryable: boolean;
+    readonly details?: Record<string, unknown>;
+    constructor(code: SiActionErrorCode, message: string, details?: Record<string, unknown>);
+}
+
+/** `aud` may be a string or a list; the hub sends `["si-actions", "si-actions:<app>"]`. */
+declare function audienceList(aud: unknown): string[];
+
+/**
+ * Validates the JSON Schema subset actions use: object/array/string/number/
+ * integer/boolean/null types (or a list of them), required, properties,
+ * additionalProperties:false, enum, items, minLength/maxLength, minimum/maximum.
+ * Returns problems as `path: message`, empty when valid.
+ */
+declare function validate(value: unknown, schema: JsonSchema, path?: string): string[];
+
+declare const SI_ACTIONS_VERSION = "1";
+declare const SI_ACTIONS_MANIFEST_PATH = "/.well-known/si-actions.json";
+interface SiActions {
+    /** The manifest the hub imports (`workflows:sync-capabilities`). */
+    manifest(): Record<string, unknown>;
+    /**
+     * Routes `GET /.well-known/si-actions.json` and `POST /si/actions/{id}`.
+     * Anything else gets a contract 404, so mount it on those paths only.
+     */
+    handle(request: SiActionRequest): Promise<SiActionResponse>;
+}
+/**
+ * Serves an app's actions to the SI Workflow Builder (SI Actions contract v1):
+ * verifies the hub's service token, scopes every call to the token's org and
+ * user, validates input and output against the declared schemas, and answers
+ * in the contract's shapes. Sync actions only for now.
+ */
+declare function createSiActions(config: SiActionsConfig): SiActions;
+
+export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type JsonSchema, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SI_ACTIONS_MANIFEST_PATH, SI_ACTIONS_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiActionAnnotations, type SiActionContext, type SiActionDefinition, SiActionError, type SiActionErrorCode, type SiActionRequest, type SiActionResponse, type SiActions, type SiActionsConfig, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, annotations, audienceList, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiActions, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore, validate as validateJsonSchema };

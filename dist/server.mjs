@@ -866,8 +866,8 @@ function createAuth(deps) {
     return { origin: `${r.protocol}//${r.host}`, path: r.pathname === "/" ? "" : r.pathname, query: r.search };
   };
   const protectedResourceMetadata = (requestUrl) => {
-    const { origin, path, query } = baseResource();
-    const resource = `${origin}${path}${queryOf(requestUrl) || query}`;
+    const { origin: origin2, path, query } = baseResource();
+    const resource = `${origin2}${path}${queryOf(requestUrl) || query}`;
     const doc = {
       resource,
       authorization_servers: [issuer],
@@ -880,17 +880,17 @@ function createAuth(deps) {
     return doc;
   };
   const resourceMetadataUrl = (requestUrl) => {
-    const { origin, path, query } = baseResource();
-    return `${origin}${PROTECTED_RESOURCE_METADATA_PATH}${path}${queryOf(requestUrl) || query}`;
+    const { origin: origin2, path, query } = baseResource();
+    return `${origin2}${PROTECTED_RESOURCE_METADATA_PATH}${path}${queryOf(requestUrl) || query}`;
   };
   const challenge = (err, options = {}) => {
-    const json = { "Content-Type": "application/json" };
+    const json2 = { "Content-Type": "application/json" };
     const metadata = () => options.resourceMetadataUrl ?? resourceMetadataUrl(options.requestUrl);
     if (err instanceof InvalidTokenError) {
       const error = err.reason === "missing" ? void 0 : "invalid_token";
       return {
         status: 401,
-        headers: { ...json, "WWW-Authenticate": bearerChallenge({ error, resourceMetadata: metadata() }) },
+        headers: { ...json2, "WWW-Authenticate": bearerChallenge({ error, resourceMetadata: metadata() }) },
         body: { error: error ?? "unauthorized", error_description: err.publicMessage }
       };
     }
@@ -898,18 +898,18 @@ function createAuth(deps) {
       return {
         status: 403,
         headers: {
-          ...json,
+          ...json2,
           "WWW-Authenticate": bearerChallenge({ error: "insufficient_scope", scope: err.requiredScopes, resourceMetadata: metadata() })
         },
         body: { error: "insufficient_scope", error_description: err.publicMessage }
       };
     }
     if (isSiServerError(err)) {
-      const headers = { ...json };
+      const headers = { ...json2 };
       if (err instanceof SiUnavailableError && err.retryAfterSeconds !== void 0) headers["Retry-After"] = String(err.retryAfterSeconds);
       return { status: 503, headers, body: { error: "temporarily_unavailable", error_description: err.publicMessage } };
     }
-    return { status: 500, headers: json, body: { error: "server_error", error_description: "Unexpected error." } };
+    return { status: 500, headers: json2, body: { error: "server_error", error_description: "Unexpected error." } };
   };
   return {
     introspect,
@@ -1379,6 +1379,277 @@ function supabaseLockStore(client, options = {}) {
     }
   };
 }
+
+// src/server/actions/errors.ts
+var STATUS = {
+  bad_request: 400,
+  unauthenticated: 401,
+  org_not_authorized: 403,
+  unknown_action: 404,
+  unknown_job: 404,
+  validation_failed: 422,
+  internal_error: 500,
+  upstream_unavailable: 503
+};
+var SiActionError = class extends Error {
+  code;
+  status;
+  retryable;
+  details;
+  constructor(code, message, details) {
+    super(message);
+    this.name = "SiActionError";
+    this.code = code;
+    this.status = STATUS[code];
+    this.retryable = code === "upstream_unavailable" || code === "internal_error";
+    this.details = details;
+  }
+};
+
+// src/server/actions/schema.ts
+function validate(value, schema, path = "input") {
+  const errors = [];
+  const types = schema.type === void 0 ? null : Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (types && !types.some((t) => matchesType(value, t))) {
+    return [`${path}: must be ${types.join(" or ")}`];
+  }
+  if (Array.isArray(schema.enum) && !schema.enum.some((e) => e === value)) {
+    errors.push(`${path}: must be one of ${schema.enum.map((e) => JSON.stringify(e)).join(", ")}`);
+  }
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) errors.push(`${path}: must be at least ${schema.minLength} characters`);
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) errors.push(`${path}: must be at most ${schema.maxLength} characters`);
+  }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) errors.push(`${path}: must be >= ${schema.minimum}`);
+    if (typeof schema.maximum === "number" && value > schema.maximum) errors.push(`${path}: must be <= ${schema.maximum}`);
+  }
+  if (Array.isArray(value) && schema.items && typeof schema.items === "object") {
+    value.forEach((item, i) => errors.push(...validate(item, schema.items, `${path}[${i}]`)));
+  }
+  if (isObject(value)) {
+    const properties = isObject(schema.properties) ? schema.properties : {};
+    for (const name of Array.isArray(schema.required) ? schema.required : []) {
+      if (value[name] === void 0) errors.push(`${path}.${name}: is required`);
+    }
+    for (const [name, child] of Object.entries(value)) {
+      if (properties[name]) {
+        errors.push(...validate(child, properties[name], `${path}.${name}`));
+      } else if (schema.additionalProperties === false) {
+        errors.push(`${path}.${name}: is not allowed`);
+      }
+    }
+  }
+  return errors;
+}
+function matchesType(value, type) {
+  switch (type) {
+    case "object":
+      return isObject(value);
+    case "array":
+      return Array.isArray(value);
+    case "string":
+      return typeof value === "string";
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "null":
+      return value === null;
+    default:
+      return true;
+  }
+}
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/server/actions/auth.ts
+function audienceList(aud) {
+  if (typeof aud === "string") return [aud];
+  return Array.isArray(aud) ? aud.filter((a) => typeof a === "string") : [];
+}
+function decodePayload(token) {
+  const part = token.split(".")[1];
+  if (!part) return null;
+  try {
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - part.length % 4) % 4);
+    const payload = JSON.parse(atob(b64));
+    return isObject(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+function checkClaims(claims, opts) {
+  if (claims.type !== "service") return "not a service token";
+  if (claims.iss !== opts.issuer) return "wrong issuer";
+  const aud = audienceList(claims.aud);
+  if (!aud.includes(opts.audience)) return "wrong audience";
+  const scoped = aud.filter((a) => a.startsWith(`${opts.audience}:`));
+  if (scoped.length > 0 && !scoped.includes(`${opts.audience}:${opts.app}`)) return "token was issued for another app";
+  if (typeof claims.exp !== "number" || claims.exp <= opts.nowSeconds) return "expired";
+  if (!Number.isInteger(Number(claims.org_id)) || !Number.isInteger(Number(claims.user_id ?? claims.sub))) return "missing org or user";
+  return null;
+}
+async function verifyServiceToken(authorization, opts) {
+  const match = /^Bearer\s+(.+)$/i.exec(authorization ?? "");
+  if (!match) throw new SiActionError("unauthenticated", "Missing bearer token.");
+  const token = match[1].trim();
+  const local = decodePayload(token);
+  const localProblem = local ? checkClaims(local, opts) : "malformed token";
+  if (local === null || localProblem) throw new SiActionError("unauthenticated", `Invalid service token: ${localProblem}.`);
+  let status;
+  let body;
+  try {
+    const res = await opts.fetch(`${opts.hubUrl}/api/verify-session-jwt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ token })
+    });
+    status = res.status;
+    body = JSON.parse(await res.text() || "null");
+  } catch {
+    throw new SiActionError("upstream_unavailable", "Could not reach the SI hub to verify the token.");
+  }
+  if (status === 400 || status === 401) throw new SiActionError("unauthenticated", "The SI hub rejected the token.");
+  if (status !== 200 || !isObject(body) || body.valid !== true || !isObject(body.claims)) {
+    throw new SiActionError("upstream_unavailable", `The SI hub verifier answered HTTP ${status}.`);
+  }
+  const claims = body.claims;
+  const same = (k) => String(claims[k]) === String(local[k]);
+  if (!same("type") || !same("iss") || !same("org_id") || String(claims.user_id ?? claims.sub) !== String(local.user_id ?? local.sub)) {
+    throw new SiActionError("unauthenticated", "Verified claims do not match the presented token.");
+  }
+  return { claims: local, organizationId: Number(local.org_id), userId: Number(local.user_id ?? local.sub) };
+}
+
+// src/server/actions/index.ts
+var SI_ACTIONS_VERSION = "1";
+var SI_ACTIONS_MANIFEST_PATH = "/.well-known/si-actions.json";
+var ID_PATTERN = /^[a-z0-9_]{1,48}$/;
+var consoleLogger2 = {
+  warn: (message, context) => context ? console.warn(message, context) : console.warn(message),
+  error: (message, context) => context ? console.error(message, context) : console.error(message)
+};
+function json(status, body, extra = {}) {
+  return { status, headers: { "Content-Type": "application/json", ...extra }, body: JSON.stringify(body) };
+}
+function errorResponse(e) {
+  return json(e.status, { error: { code: e.code, message: e.message, retryable: e.retryable, ...e.details ? { details: e.details } : {} } });
+}
+function origin(url, name) {
+  try {
+    const u = new URL(url);
+    return u.origin;
+  } catch {
+    throw new InvalidArgumentError(`${name} must be an absolute URL`);
+  }
+}
+function int(value) {
+  const n = Number(value);
+  return value !== void 0 && value !== null && Number.isInteger(n) ? n : null;
+}
+function createSiActions(config) {
+  if (!config || typeof config !== "object") throw new InvalidArgumentError("config is required");
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(config.app ?? "")) throw new InvalidArgumentError("app must be the lowercase app slug");
+  const baseUrl = origin(config.baseUrl, "baseUrl");
+  const hubUrl = origin(config.hubUrl, "hubUrl");
+  const logger = config.logger ?? consoleLogger2;
+  const now = config.now ?? Date.now;
+  const fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
+  const issuer = config.issuer ?? "supreme-intelligence";
+  const audience = config.audience ?? "si-actions";
+  const actions = /* @__PURE__ */ new Map();
+  for (const a of config.actions ?? []) {
+    if (!ID_PATTERN.test(a.id)) throw new InvalidArgumentError(`action id '${a.id}' must match ${ID_PATTERN}`);
+    if (actions.has(a.id)) throw new InvalidArgumentError(`duplicate action id '${a.id}'`);
+    if (a.inputSchema?.type !== "object" || a.outputSchema?.type !== "object") {
+      throw new InvalidArgumentError(`action '${a.id}' schemas must be of type object`);
+    }
+    actions.set(a.id, a);
+  }
+  const manifest = () => ({
+    si_actions_version: SI_ACTIONS_VERSION,
+    app: config.app,
+    base_url: baseUrl,
+    actions: [...actions.values()].map((a) => ({
+      id: a.id,
+      name: a.name,
+      description: a.description,
+      input_schema: a.inputSchema,
+      output_schema: a.outputSchema,
+      annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true, ...a.annotations ?? {} },
+      execution: { mode: "sync", typical_seconds: a.execution?.typicalSeconds ?? 10, max_seconds: a.execution?.maxSeconds ?? 120 },
+      examples: a.examples ?? []
+    }))
+  });
+  async function execute(actionId, request) {
+    const action = actions.get(actionId);
+    if (!action) throw new SiActionError("unknown_action", `Unknown action '${actionId}'.`);
+    const service = await verifyServiceToken(request.headers.get("authorization"), {
+      issuer,
+      audience,
+      app: config.app,
+      hubUrl,
+      fetch: fetchImpl,
+      nowSeconds: Math.floor(now() / 1e3)
+    });
+    let body;
+    try {
+      body = JSON.parse(await request.text() || "{}");
+    } catch {
+      throw new SiActionError("bad_request", "Body must be JSON.");
+    }
+    if (!isObject(body)) throw new SiActionError("bad_request", "Body must be a JSON object.");
+    if (body.action_id !== void 0 && body.action_id !== actionId) throw new SiActionError("bad_request", "action_id does not match the path.");
+    const input = body.input === void 0 ? {} : body.input;
+    const problems = validate(input, action.inputSchema);
+    if (problems.length > 0) throw new SiActionError("validation_failed", problems[0], { errors: problems });
+    const claims = service.claims;
+    const context = {
+      organizationId: service.organizationId,
+      organizationSlug: typeof claims.org_slug === "string" ? claims.org_slug : null,
+      userId: service.userId,
+      workflowId: int(claims.workflow_id),
+      runId: int(claims.run_id),
+      nodeId: typeof claims.node_id === "string" ? claims.node_id : null,
+      attempt: int(claims.attempt) ?? 1,
+      idempotencyKey: request.headers.get("x-si-idempotency-key")
+    };
+    const output = await action.handler(input, context);
+    if (!isObject(output)) throw new SiActionError("internal_error", "The action returned a non-object output.");
+    const outProblems = validate(output, action.outputSchema, "output");
+    if (outProblems.length > 0) {
+      logger.error?.("[si-sdk/actions] output does not match output_schema", { action: actionId, errors: outProblems });
+      throw new SiActionError("internal_error", "The action produced output that does not match its schema.");
+    }
+    return json(200, { status: "completed", output });
+  }
+  async function handle(request) {
+    let path;
+    try {
+      path = new URL(request.url).pathname.replace(/\/+$/, "");
+    } catch {
+      return errorResponse(new SiActionError("bad_request", "Invalid request URL."));
+    }
+    try {
+      if (request.method === "GET" && path === SI_ACTIONS_MANIFEST_PATH) {
+        return json(200, manifest(), { "Cache-Control": "public, max-age=300" });
+      }
+      const m = /\/si\/actions\/([^/]+)$/.exec(path);
+      if (request.method === "POST" && m) return await execute(decodeURIComponent(m[1]), request);
+      if (/\/si\/actions\/[^/]+\/jobs\/[^/]+$/.test(path)) throw new SiActionError("unknown_job", "This app has no async jobs.");
+      throw new SiActionError("unknown_action", "Not an SI Actions route.");
+    } catch (e) {
+      if (e instanceof SiActionError) return errorResponse(e);
+      logger.error?.("[si-sdk/actions] action threw", { error: e instanceof Error ? e.message : String(e) });
+      return errorResponse(new SiActionError("internal_error", "The action failed."));
+    }
+  }
+  return { manifest, handle };
+}
 export {
   AUDIT_EVENTS_PATH,
   AppInactiveError,
@@ -1402,16 +1673,21 @@ export {
   OrgLockedError,
   PROTECTED_RESOURCE_METADATA_PATH,
   SERVER_SDK_VERSION,
+  SI_ACTIONS_MANIFEST_PATH,
+  SI_ACTIONS_VERSION,
   SUPABASE_LOCK_STORE_SQL,
+  SiActionError,
   SiServerError,
   SiUnavailableError,
   SiValidationError,
   UserGoneError,
   annotations,
+  audienceList,
   bearerChallenge,
   bearerToken,
   canonicalResourceUri,
   conversationKey,
+  createSiActions,
   createSiServerClient,
   errorResult,
   hashConversationKey,
@@ -1422,5 +1698,6 @@ export {
   memoryLockStore,
   orgBanner,
   requireScope,
-  supabaseLockStore
+  supabaseLockStore,
+  validate as validateJsonSchema
 };

@@ -1049,6 +1049,49 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --list
 SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 ```
 
+#### Workflow actions (SI Actions)
+
+`createSiActions` serves an app's actions to the SI Workflow Builder, so the app's work can run as a step in a hub workflow. The app declares each action (schemas plus a handler); the SDK verifies the hub's service token, scopes the call to the token's org and user, validates input and output, answers in the contract's shapes, and publishes the manifest the hub imports with `workflows:sync-capabilities`.
+
+```ts
+import { createSiActions, SiActionError } from "@supreme-ai/si-sdk/server";
+
+export const siActions = createSiActions({
+  app: "data-library",                         // app slug in SI
+  baseUrl: process.env.SI_ACTIONS_BASE_URL!,   // public origin the hub calls
+  hubUrl: process.env.SI_HUB_URL!,             // e.g. https://app.supremegroup.ai
+  actions: [{
+    id: "search_library",
+    name: "Search the library",
+    description: "Find evidence records by keyword. Returns titles, ids and a short summary.",
+    inputSchema: { type: "object", properties: { query: { type: "string", maxLength: 200 } }, required: ["query"], additionalProperties: false },
+    outputSchema: { type: "object", properties: { count: { type: "integer" }, summary: { type: "string" } }, required: ["count", "summary"] },
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    handler: async ({ query }, ctx) => {
+      // ctx.organizationId and ctx.userId come from the verified token only.
+      return { count: 0, summary: `No records for ${query}.` };
+    },
+  }],
+});
+
+// Next.js: app/si/actions/[...path]/route.ts and app/.well-known/si-actions.json/route.ts
+export async function POST(req: Request) {
+  const r = await siActions.handle(req);
+  return new Response(r.body, { status: r.status, headers: r.headers });
+}
+export const GET = POST;
+```
+
+| Route | Behaviour |
+|-------|-----------|
+| `GET /.well-known/si-actions.json` | Manifest (`si_actions_version: "1"`, `app`, `base_url`, `actions[]`), `Cache-Control: public, max-age=300` |
+| `POST /si/actions/{id}` | Body `{ action_id?, input, context }`. `200 { status: "completed", output }` |
+| Errors | `{ error: { code, message, retryable, details? } }`: `bad_request` 400, `unauthenticated` 401, `unknown_action`/`unknown_job` 404, `validation_failed` 422, `internal_error` 500, `upstream_unavailable` 503 (retryable) |
+
+Token checks, in order: `Authorization: Bearer`, `type: "service"`, `iss` (`supreme-intelligence`), `aud` contains `si-actions` and, when the token is scoped (`si-actions:<app>`), it names this app; not expired; `org_id` and `user_id` present. Then `POST {hubUrl}/api/verify-session-jwt` confirms the signature and its claims must match. Tokens are never cached. Org, user and run context come from the token, never from the body or headers.
+
+Throw `SiActionError(code, message, details?)` from a handler for a contract error (for example `validation_failed` for a record the caller can't see). Any other exception becomes a generic `500`, and output that breaks `outputSchema` is refused. Sync actions only for now; async jobs (202, polling, callbacks) come next.
+
 ---
 
 ## Exports
@@ -1070,6 +1113,7 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 | `createSiServerClient` | Server client: `auth`, `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
 | `requireScope`, `bearerChallenge`, `bearerToken`, `canonicalResourceUri`, `isVerifiedPrincipal` | Auth helpers (1.3.0) |
 | `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL` | Adapters and the Supabase migration |
+| `createSiActions`, `SiActionError`, `audienceList`, `validateJsonSchema`, `SI_ACTIONS_VERSION`, `SI_ACTIONS_MANIFEST_PATH` | Workflow actions (SI Actions) server |
 | `conversationKey`, `hashConversationKey` | Conversation-key resolver and SHA-256 hash |
 | `annotations`, `labelResult`, `errorResult`, `orgBanner` | MCP helpers |
 | `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `InvalidTokenError`, `InsufficientScopeError`, `SiValidationError`, `isSiServerError` | Errors |
@@ -1091,6 +1135,10 @@ MIT
 - Added token introspection and grant status to `@supreme-ai/si-sdk/server` (1.3.0, SI-378 v2 for SI-375 / SI-417): `si.auth.introspect` (`POST /api/oauth/introspect`; fails closed, checks `aud` and `exp`, caches `active: true` ≤ 60 s and ≤ `exp` keyed by a token hash, never caches negatives), `si.auth.grantStatus` (`POST /api/oauth/grants/status`, chunked by 100), `requireScope` / `InsufficientScopeError`, `challenge` (401 / 403 `WWW-Authenticate`, 503 + `Retry-After`), `protectedResourceMetadata` (echoes `?instance=`), new `auth` config and errors `InvalidTokenError`, `SiValidationError`; `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool` accept the introspection principal (no membership call). `SiUnavailableError` gains `retryAfterSeconds`. [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-10-15
+
+- Add `createSiActions` to the server entry: serves an app's actions to the SI Workflow Builder (manifest, hub service-token verification, input/output validation, contract errors). Sync actions only. [actions/](src/server/actions/index.ts), README "Workflow actions".
 
 ### 2026-10-07
 
