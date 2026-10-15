@@ -32,6 +32,73 @@ export interface Membership {
 /** An organization the user may use in this app right now. */
 export type ResolvedOrganization = MembershipOrganization;
 
+/**
+ * A verified SI access token: the normalized `active: true` answer of
+ * `POST /api/oauth/introspect`. Only `si.auth.introspect` creates one (the
+ * object is frozen, and `scopeToolCall` rejects look-alikes).
+ */
+export interface IntrospectionPrincipal {
+  /** SI user id, as a string. Key your user rows on it. */
+  readonly sub: string;
+  /** This app's canonical resource URI (already checked by the SDK). */
+  readonly aud: string;
+  /** Granted scopes (SI's space-separated `scope`, split). */
+  readonly scope: readonly string[];
+  /** The MCP client: its CIMD URL, or its DCR id. */
+  readonly clientId: string;
+  readonly clientName: string | null;
+  /** The user's consent to this client at this resource. Stable across refreshes; use it as the connection id. */
+  readonly grantId: string;
+  /** The `resource` the client asked for: `aud`, or a query variant such as `…/mcp?instance=broth`. */
+  readonly requestedResource: string;
+  readonly isSuperadmin: boolean;
+  /** Orgs the user may use this app in, computed live by SI (same shape as membership). May be empty. */
+  readonly organizations: readonly Readonly<MembershipOrganization>[];
+  /** Expiry, Unix seconds. */
+  readonly exp: number;
+  /** Issued at, Unix seconds. */
+  readonly iat: number;
+  /** SI's issuer. */
+  readonly iss: string;
+  /** Only when SI returns it. */
+  readonly email?: string;
+  /** Only when SI returns it. */
+  readonly name?: string;
+  /** True when served from the introspection cache. */
+  readonly fromCache: boolean;
+}
+
+export type GrantStatus = 'active' | 'revoked' | 'expired' | 'unknown';
+
+export interface AuthConfig {
+  /**
+   * This app's canonical MCP resource URI, exactly as registered in SI
+   * (`mcp_resources.resource_uri`), e.g. `https://studio-canvas.supremegroup.ai/mcp`.
+   * Introspection rejects tokens whose `aud` differs. Can also be passed per call.
+   */
+  resource?: string;
+  /** SI's OAuth issuer for `authorization_servers` in the PRM. Default `baseUrl`. */
+  issuer?: string;
+  /**
+   * Cache for introspection and grant-status answers. Default: a separate
+   * in-process `memoryCache()` (not `config.cache`), so principals (which
+   * carry email) stay in process unless you opt into a shared store.
+   */
+  cache?: CacheAdapter;
+  /** Cache TTL for `active: true` answers, further capped by the token's `exp`. Default and max 60 s; 0 disables. */
+  introspectionTtlSeconds?: number;
+  /** Cache TTL for `active` grant statuses. Default 0 (off), max 60 s. */
+  grantStatusTtlSeconds?: number;
+  /** `scopes_supported` in the PRM. */
+  scopesSupported?: string[];
+  /** `resource_name` in the PRM. */
+  resourceName?: string;
+  /** `resource_documentation` in the PRM. */
+  resourceDocumentation?: string;
+  /** `logo_uri` in the PRM. */
+  logoUri?: string;
+}
+
 export type ToolKind = 'read' | 'write';
 export type ScopeMode = 'locked' | 'soft';
 
@@ -100,6 +167,8 @@ export interface SiServerConfig {
     windowSeconds?: number;
   };
   conversation?: ConversationKeyOptions;
+  /** Token introspection, grant status and protected-resource metadata (`si.auth`). */
+  auth?: AuthConfig;
   /** Called for every `scopeToolCall`. Errors are swallowed. */
   onAudit?: (event: AuditEvent) => void | Promise<void>;
   /** Forward audit events to SI. Opt-in, default off. */

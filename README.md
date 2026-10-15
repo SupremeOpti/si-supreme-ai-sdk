@@ -63,6 +63,7 @@ Server entry (`@supreme-ai/si-sdk/server`, server-side only, see [Server entry](
 |----------|--------------------------|-------|
 | `SI_MEMBERSHIP_KEY` | `membershipKey` | The app's `membership_api` key. Secret: never in a client bundle or `VITE_*` variable. |
 | `SI_BASE_URL` (suggested) | `baseUrl` | e.g. `https://app.supremegroup.ai` |
+| `SI_MCP_RESOURCE` (suggested) | `auth.resource` | The app's canonical MCP resource URI as registered in SI, e.g. `https://studio-canvas.supremegroup.ai/mcp`. Only for apps on SI OAuth (`si.auth`). |
 
 ---
 
@@ -147,9 +148,12 @@ Server entry (`@supreme-ai/si-sdk/server`, `createSiServerClient(config)`):
 
 | Section | Method | HTTP (when applicable) |
 |---------|--------|-------------------------|
+| Auth (1.3.0) | `si.auth.introspect` | `POST /api/oauth/introspect` |
+| Auth (1.3.0) | `si.auth.grantStatus` | `POST /api/oauth/grants/status` (chunks of 100) |
+| Auth (1.3.0) | `si.auth.requireScope`, `challenge`, `protectedResourceMetadata`, `resourceMetadataUrl`, `bearerToken` | local (serve the PRM at `/.well-known/oauth-protected-resource[/<path>]`) |
 | Membership | `si.membership.get`, `requireOrg`, `findOrganization`, `invalidate` | `GET /api/membership/users/{user}/organizations` |
-| Organizations | `si.organizations.resolve` (slug or id) | via membership |
-| MCP | `si.mcp.conversationKey`, `scopeToolCall`, `labelResult`, `errorResult`, `listOrganizationsTool`, `annotations` | via membership |
+| Organizations | `si.organizations.resolve` (slug or id; user id or introspection principal) | via membership, or the principal's orgs |
+| MCP | `si.mcp.conversationKey`, `scopeToolCall`, `labelResult`, `errorResult`, `listOrganizationsTool`, `annotations` | via membership, or the principal's orgs |
 | Locks | `si.locks.bindOrg`, `release` | lock store adapter |
 | Detection | `si.detection.recordRead`, `checkWrite` | cache adapter |
 | Audit | `si.audit.emit`, `flush`, `forwarding` | `POST /api/membership/audit-events` (opt-in, not live yet) |
@@ -837,7 +841,7 @@ Configure allowed parent origins via `allowedOrigins` in config.
 
 Full contract, adapter interface, org-isolation model and a worked MCP tool handler: [docs/SERVER.md](docs/SERVER.md).
 
-**`userId` must be the authenticated caller** (the `sub` of the token your server verified), never a value from tool arguments or request input: v1 trusts it and does not verify tokens itself (that arrives with SI-375). See [Identity](docs/SERVER.md#identity-who-userid-is).
+**Identity.** Apps on SI OAuth pass the `principal` from `si.auth.introspect` (below): the SDK takes the user and the org list from SI's answer for the bearer. Otherwise **`userId` must be the authenticated caller** (the `sub` of the token your server verified), never a value from tool arguments or request input: the SDK trusts it. See [Identity](docs/SERVER.md#identity-who-userid-is).
 
 ```ts
 import { createSiServerClient, supabaseLockStore, annotations } from "@supreme-ai/si-sdk/server";
@@ -894,9 +898,70 @@ try {
 | Detection | Read org A then write org B within 15 min (same principal + client) → warning on the write. Never blocks. |
 | Audit | `onAudit(event)` hook on every call. Forwarding to SI (`auditForwarding: { enabled: true }`) is opt-in, default off: available once SI enables the endpoint (SI-379). |
 
+#### Token introspection (`si.auth`, 1.3.0)
+
+For an app whose MCP server is an SI OAuth resource (SI-375 / SI-411). Uses the same `membership_api` key. Full rules and a canva-style handler: [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth).
+
+```ts
+const si = createSiServerClient({
+  baseUrl: "https://app.supremegroup.ai",
+  membershipKey: process.env.SI_MEMBERSHIP_KEY!,
+  locks: supabaseLockStore(serviceRoleSupabase),
+  auth: { resource: "https://studio-canvas.supremegroup.ai/mcp", scopesSupported: ["mcp:canva:base", "mcp:canva:runs"] },
+});
+
+// GET /.well-known/oauth-protected-resource and /.well-known/oauth-protected-resource/mcp
+si.auth.protectedResourceMetadata(req.url);
+// → { resource: "https://studio-canvas.supremegroup.ai/mcp?instance=broth", authorization_servers: ["https://app.supremegroup.ai"], bearer_methods_supported: ["header"], scopes_supported: [...] }
+
+// Every MCP request:
+let principal;
+try {
+  principal = await si.auth.introspect(si.auth.bearerToken(req.headers));
+  si.auth.requireScope(principal, "mcp:canva:base");
+} catch (err) {
+  const c = si.auth.challenge(err, { requestUrl: req.url }); // 401 / 403 + WWW-Authenticate, or 503
+  return new Response(JSON.stringify(c.body), { status: c.status, headers: c.headers });
+}
+const scope = await si.mcp.scopeToolCall({ principal, conversationKey, organization: args.organization, tool, kind: "write" });
+
+// Background job with a stored grant id, no bearer:
+const status = await si.auth.grantStatus([job.grant_id]); // { "<grant id>": "active" | "revoked" | "expired" | "unknown" }
+```
+
+`introspect` returns a frozen principal:
+
+```json
+{
+  "sub": "456",
+  "aud": "https://studio-canvas.supremegroup.ai/mcp",
+  "scope": ["mcp:canva:base", "mcp:canva:storyboards"],
+  "clientId": "https://claude.ai/oauth/claude-code-client-metadata",
+  "clientName": "Claude Code",
+  "grantId": "0199a6c2-7e1b-7c3a-9f4e-2b8d6c1a0e55",
+  "requestedResource": "https://studio-canvas.supremegroup.ai/mcp?instance=broth",
+  "isSuperadmin": false,
+  "organizations": [{ "id": 29, "slug": "supreme-group", "name": "Supreme Group", "roles": ["orgadmin"], "appGrant": "role" }],
+  "exp": 1790000000,
+  "iat": 1789996400,
+  "iss": "https://app.supremegroup.ai",
+  "email": "ada@example.com",
+  "name": "Ada Lovelace",
+  "fromCache": false
+}
+```
+
+| Rule | Behaviour |
+|------|-----------|
+| Fail closed | `active: false`, `aud` ≠ `auth.resource`, past `exp`, or no token → `InvalidTokenError`. Network error, timeout, 5xx, `429`, malformed body → `SiUnavailableError`. `401` / `500 misconfigured_key` → `MisconfiguredKeyError`; `403 app_inactive` → `AppInactiveError`; `422` → `SiValidationError`. |
+| Cache | `active: true` only, ≤ 60 s and never past `exp`, keyed by SHA-256 of the token. `active: false` and errors are never cached. In-process by default (`auth.cache` to override). |
+| `429` | `retryAfterSeconds` from `Retry-After`; SI isn't called again until it passes (cap 60 s). |
+| Scopes | `requireScope` → `InsufficientScopeError`; `challenge` answers `403` with `scope="<every required scope>"`. |
+| Grant status | Chunked by 100, deduped, no partial answers. Optional `active`-only cache (`auth.grantStatusTtlSeconds`, default off, max 60). |
+
 Adapters: `memoryCache()` (fine in production), `memoryLockStore()` (tests/dev only), `supabaseLockStore(client)` with the SQL in [docs/SERVER.md](docs/SERVER.md#supabase-lock-store) (also exported as `SUPABASE_LOCK_STORE_SQL`).
 
-Errors (all extend `SiServerError`, stable `code`): `OrgAccessDeniedError` (`org_access_denied`), `OrgLockedError` (`org_locked`), `UserGoneError` (`user_not_found`: revoke the connection), `SiUnavailableError` (`si_unavailable`), `MisconfiguredKeyError` (`misconfigured_key`), `AppInactiveError` (`app_inactive`), `LockStoreUnavailableError` (`lock_store_unavailable`), `InvalidArgumentError` (`invalid_argument`).
+Errors (all extend `SiServerError`, stable `code`): `OrgAccessDeniedError` (`org_access_denied`), `OrgLockedError` (`org_locked`), `UserGoneError` (`user_not_found`: revoke the connection), `SiUnavailableError` (`si_unavailable`), `MisconfiguredKeyError` (`misconfigured_key`), `AppInactiveError` (`app_inactive`), `LockStoreUnavailableError` (`lock_store_unavailable`), `InvalidArgumentError` (`invalid_argument`), and for `si.auth`: `InvalidTokenError` (`invalid_token`), `InsufficientScopeError` (`insufficient_scope`), `SiValidationError` (`validation_failed`).
 
 Deno / Supabase edge functions import the built ESM by URL, pinned to a commit SHA:
 
@@ -953,6 +1018,14 @@ interface SiServerConfig {
   lockTtlSeconds?: number;         // default 86400
   detection?: { enabled?: boolean; windowSeconds?: number };          // true / 900
   conversation?: { codexHeaders?: string[]; siHeader?: string };
+  auth?: {                         // si.auth (1.3.0)
+    resource?: string;             // canonical MCP resource URI (SI_MCP_RESOURCE)
+    issuer?: string;               // PRM authorization_servers, default baseUrl
+    cache?: CacheAdapter;          // default: separate in-process memoryCache()
+    introspectionTtlSeconds?: number; // default and max 60, never past exp
+    grantStatusTtlSeconds?: number;   // default 0 (off), max 60
+    scopesSupported?: string[]; resourceName?: string; resourceDocumentation?: string; logoUri?: string; // PRM
+  };
   onAudit?: (event: AuditEvent) => void | Promise<void>;
   auditForwarding?: { enabled?: boolean; batchSize?: number; flushIntervalMs?: number }; // enabled: false
   now?: () => number;
@@ -994,13 +1067,14 @@ SUPREME_JWT=eyJ... ORGANIZATION_ID=29 node scripts/test-reports.mjs --create
 
 | Export | Description |
 |--------|-------------|
-| `createSiServerClient` | Server client: `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
+| `createSiServerClient` | Server client: `auth`, `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
+| `requireScope`, `bearerChallenge`, `bearerToken`, `canonicalResourceUri`, `isVerifiedPrincipal` | Auth helpers (1.3.0) |
 | `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL` | Adapters and the Supabase migration |
 | `conversationKey`, `hashConversationKey` | Conversation-key resolver and SHA-256 hash |
 | `annotations`, `labelResult`, `errorResult`, `orgBanner` | MCP helpers |
-| `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `isSiServerError` | Errors |
-| `SERVER_SDK_VERSION`, `MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER` | Constants |
-| Types | `SiServerConfig`, `Membership`, `ResolvedOrganization`, `ToolScope`, `ScopeToolCallInput`, `McpToolResult`, `AuditEvent`, `CacheAdapter`, `LockStoreAdapter`, … |
+| `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `InvalidTokenError`, `InsufficientScopeError`, `SiValidationError`, `isSiServerError` | Errors |
+| `SERVER_SDK_VERSION`, `MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`, `INTROSPECT_PATH`, `GRANT_STATUS_PATH`, `PROTECTED_RESOURCE_METADATA_PATH`, `MAX_INTROSPECTION_TTL_SECONDS`, `MAX_GRANT_STATUS_TTL_SECONDS`, `GRANT_STATUS_CHUNK_SIZE` | Constants |
+| Types | `SiServerConfig`, `AuthConfig`, `IntrospectionPrincipal`, `GrantStatus`, `AuthApi`, `AuthChallenge`, `ProtectedResourceMetadata`, `Membership`, `ResolvedOrganization`, `ToolScope`, `ScopeToolCallInput`, `McpToolResult`, `AuditEvent`, `CacheAdapter`, `LockStoreAdapter`, … |
 
 ---
 
@@ -1011,6 +1085,10 @@ MIT
 ---
 
 ## Changelog
+
+### 2026-10-15
+
+- Added token introspection and grant status to `@supreme-ai/si-sdk/server` (1.3.0, SI-378 v2 for SI-375 / SI-417): `si.auth.introspect` (`POST /api/oauth/introspect`; fails closed, checks `aud` and `exp`, caches `active: true` ≤ 60 s and ≤ `exp` keyed by a token hash, never caches negatives), `si.auth.grantStatus` (`POST /api/oauth/grants/status`, chunked by 100), `requireScope` / `InsufficientScopeError`, `challenge` (401 / 403 `WWW-Authenticate`, 503 + `Retry-After`), `protectedResourceMetadata` (echoes `?instance=`), new `auth` config and errors `InvalidTokenError`, `SiValidationError`; `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool` accept the introspection principal (no membership call). `SiUnavailableError` gains `retryAfterSeconds`. [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
 

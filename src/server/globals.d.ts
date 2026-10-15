@@ -21,8 +21,10 @@ declare var URL: {
   new (url: string, base?: string): {
     readonly protocol: string;
     readonly hostname: string;
+    readonly host: string;
     readonly origin: string;
     readonly pathname: string;
+    readonly search: string;
     toString(): string;
   };
 };

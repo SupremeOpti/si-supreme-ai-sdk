@@ -19,9 +19,27 @@ export {
   AppInactiveError,
   LockStoreUnavailableError,
   InvalidArgumentError,
+  InvalidTokenError,
+  InsufficientScopeError,
+  SiValidationError,
   isSiServerError,
 } from './errors';
-export type { SiServerErrorCode, SiUnavailableReason, LockedOrganization } from './errors';
+export type { SiServerErrorCode, SiUnavailableReason, LockedOrganization, InvalidTokenReason } from './errors';
+
+export {
+  bearerChallenge,
+  bearerToken,
+  canonicalResourceUri,
+  isVerifiedPrincipal,
+  requireScope,
+  INTROSPECT_PATH,
+  GRANT_STATUS_PATH,
+  PROTECTED_RESOURCE_METADATA_PATH,
+  MAX_INTROSPECTION_TTL_SECONDS,
+  MAX_GRANT_STATUS_TTL_SECONDS,
+  GRANT_STATUS_CHUNK_SIZE,
+} from './auth';
+export type { AuthApi, AuthChallenge, ChallengeOptions, IntrospectOptions, ProtectedResourceMetadata } from './auth';
 
 export { memoryCache, memoryLockStore } from './adapters/memory';
 export type { MemoryAdapterOptions } from './adapters/memory';
@@ -67,4 +85,7 @@ export type {
   AuditEvent,
   AuditForwardingConfig,
   ConversationKeyOptions,
+  IntrospectionPrincipal,
+  GrantStatus,
+  AuthConfig,
 } from './types';
