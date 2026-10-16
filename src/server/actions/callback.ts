@@ -58,8 +58,10 @@ export async function completeCallback(
   const payload = body(result);
 
   let last: SiCallbackResult = { delivered: false, accepted: false, status: 0, code: 'upstream_unavailable' };
+  let retryAfterMs: number | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
+    if (attempt > 0) await sleep(retryAfterMs ?? 500 * 2 ** (attempt - 1));
+    retryAfterMs = null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -75,13 +77,13 @@ export async function completeCallback(
       } catch {
         parsed = null;
       }
-      if (res.status === 200) {
+      if (res.status >= 200 && res.status < 300) {
         const ok = isObject(parsed) ? parsed : {};
         const accepted = ok.accepted !== false;
         return {
           delivered: true,
           accepted,
-          status: 200,
+          status: res.status,
           ...(accepted ? {} : { code: typeof ok.reason === 'string' ? ok.reason : 'invalid_output' }),
           ...(Array.isArray(ok.errors) ? { errors: ok.errors.map(String) } : {}),
         };
@@ -96,6 +98,8 @@ export async function completeCallback(
         ...(validation ? { errors: validation } : {}),
       };
       if (!retryable(res.status)) return last;
+      const after = Number(res.headers.get('retry-after'));
+      if (res.status === 429 && Number.isFinite(after) && after >= 0) retryAfterMs = Math.min(after, 60) * 1000;
     } catch {
       last = { delivered: false, accepted: false, status: 0, code: 'upstream_unavailable' };
     } finally {

@@ -165,19 +165,25 @@ export function createSiActions(config: SiActionsConfig): SiActions {
     return output;
   }
 
-  function acceptedResponse(action: SiActionDefinition, accepted: SiActionAccepted, request: SiActionRequest): SiActionResponse {
+  function acceptedResponse(action: SiActionDefinition, accepted: SiActionAccepted): SiActionResponse {
     if (!isAsync(action)) {
       logger.error?.('[si-sdk/actions] a sync action returned acceptSiAction()', { action: action.id });
       throw new SiActionError('internal_error', 'The action failed.');
     }
-    const called = new URL(request.url);
+    // Resolve against baseUrl, the public origin the hub calls; request.url can be an internal host behind a proxy.
+    const base = new URL(baseUrl);
     let pollUrl: string | undefined;
     const raw = accepted.pollUrl ?? (action.getJob && accepted.jobId ? `/si/actions/${action.id}/jobs/${encodeURIComponent(accepted.jobId)}` : undefined);
     if (raw !== undefined) {
-      const u = new URL(raw, called.origin);
-      // The hub ignores a poll_url off the host it called, so say so here instead.
-      if (u.hostname === called.hostname) pollUrl = u.toString();
-      else logger.warn?.('[si-sdk/actions] poll_url dropped: not on the host the hub called', { action: action.id });
+      let u: InstanceType<typeof URL> | null = null;
+      try {
+        u = new URL(raw, base.origin);
+      } catch {
+        u = null;
+      }
+      // The hub ignores a poll_url off the host and port it called, so say so here instead.
+      if (u !== null && u.host === base.host) pollUrl = u.toString();
+      else logger.warn?.('[si-sdk/actions] poll_url dropped: invalid or not on baseUrl\'s host', { action: action.id });
     }
     const est = accepted.estimatedSeconds;
     return json(202, {
@@ -214,7 +220,7 @@ export function createSiActions(config: SiActionsConfig): SiActions {
     const context = contextFrom(service, request, callback);
 
     const result = await action.handler(input as Record<string, unknown>, context);
-    if (isAccepted(result)) return acceptedResponse(action, result, request);
+    if (isAccepted(result)) return acceptedResponse(action, result);
     return json(200, { status: 'completed', output: checkOutput(action, result) });
   }
 

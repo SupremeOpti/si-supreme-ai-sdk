@@ -1565,8 +1565,10 @@ async function completeCallback(callback, result, fetchImpl, options = {}) {
   const retries = Math.max(0, Math.min(10, options.retries ?? 3));
   const payload = body(result);
   let last = { delivered: false, accepted: false, status: 0, code: "upstream_unavailable" };
+  let retryAfterMs = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
+    if (attempt > 0) await sleep(retryAfterMs ?? 500 * 2 ** (attempt - 1));
+    retryAfterMs = null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -1582,13 +1584,13 @@ async function completeCallback(callback, result, fetchImpl, options = {}) {
       } catch {
         parsed = null;
       }
-      if (res.status === 200) {
+      if (res.status >= 200 && res.status < 300) {
         const ok = isObject(parsed) ? parsed : {};
         const accepted = ok.accepted !== false;
         return {
           delivered: true,
           accepted,
-          status: 200,
+          status: res.status,
           ...accepted ? {} : { code: typeof ok.reason === "string" ? ok.reason : "invalid_output" },
           ...Array.isArray(ok.errors) ? { errors: ok.errors.map(String) } : {}
         };
@@ -1603,6 +1605,8 @@ async function completeCallback(callback, result, fetchImpl, options = {}) {
         ...validation ? { errors: validation } : {}
       };
       if (!retryable(res.status)) return last;
+      const after = Number(res.headers.get("retry-after"));
+      if (res.status === 429 && Number.isFinite(after) && after >= 0) retryAfterMs = Math.min(after, 60) * 1e3;
     } catch {
       last = { delivered: false, accepted: false, status: 0, code: "upstream_unavailable" };
     } finally {
@@ -1719,18 +1723,23 @@ function createSiActions(config) {
     }
     return output;
   }
-  function acceptedResponse(action, accepted, request) {
+  function acceptedResponse(action, accepted) {
     if (!isAsync(action)) {
       logger.error?.("[si-sdk/actions] a sync action returned acceptSiAction()", { action: action.id });
       throw new SiActionError("internal_error", "The action failed.");
     }
-    const called = new URL(request.url);
+    const base = new URL(baseUrl);
     let pollUrl;
     const raw = accepted.pollUrl ?? (action.getJob && accepted.jobId ? `/si/actions/${action.id}/jobs/${encodeURIComponent(accepted.jobId)}` : void 0);
     if (raw !== void 0) {
-      const u = new URL(raw, called.origin);
-      if (u.hostname === called.hostname) pollUrl = u.toString();
-      else logger.warn?.("[si-sdk/actions] poll_url dropped: not on the host the hub called", { action: action.id });
+      let u = null;
+      try {
+        u = new URL(raw, base.origin);
+      } catch {
+        u = null;
+      }
+      if (u !== null && u.host === base.host) pollUrl = u.toString();
+      else logger.warn?.("[si-sdk/actions] poll_url dropped: invalid or not on baseUrl's host", { action: action.id });
     }
     const est = accepted.estimatedSeconds;
     return json(202, {
@@ -1759,7 +1768,7 @@ function createSiActions(config) {
     const callback = typeof bodyContext.callback_url === "string" && typeof bodyContext.callback_token === "string" && bodyContext.callback_token !== "" ? { url: bodyContext.callback_url, token: bodyContext.callback_token } : null;
     const context = contextFrom(service, request, callback);
     const result = await action.handler(input, context);
-    if (isAccepted(result)) return acceptedResponse(action, result, request);
+    if (isAccepted(result)) return acceptedResponse(action, result);
     return json(200, { status: "completed", output: checkOutput(action, result) });
   }
   async function job(actionId, jobId, request) {

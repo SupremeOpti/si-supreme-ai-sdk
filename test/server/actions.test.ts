@@ -224,6 +224,15 @@ describe('async actions', () => {
     };
     expect(await run('https://evil.example.net/status/j')).toEqual({ status: 'accepted', job_id: 'j' });
     expect((await run('/jobs/j')).poll_url).toBe('https://library.example.com/jobs/j');
+    expect(await run('https://library.example.com:8443/jobs/j')).toEqual({ status: 'accepted', job_id: 'j' });
+    expect(await run('http://[bad')).toEqual({ status: 'accepted', job_id: 'j' });
+  });
+
+  it('builds the default poll_url from baseUrl, not an internal request host', async () => {
+    const action = { ...exportAction, handler: async () => acceptSiAction({ jobId: 'job_1' }) };
+    const { si } = setup([verified()], [action]);
+    const internal = { ...req('POST', '/si/actions/export_report', { auth: token(goodClaims()), body: asyncBody }), url: 'http://127.0.0.1:3000/si/actions/export_report' };
+    expect(parse(await si.handle(internal)).poll_url).toBe('https://library.example.com/si/actions/export_report/jobs/job_1');
   });
 
   it('refuses acceptSiAction from a sync action and an empty jobId; jobId is optional', async () => {
@@ -300,6 +309,15 @@ describe('completeJob', () => {
     expect(r.delivered).toBe(true);
     expect(race.fetch.calls).toHaveLength(3);
   }, 10_000);
+
+  it('honours Retry-After on 429 and treats any 2xx as delivered', async () => {
+    const { si, fetch } = setup([{ status: 429, raw: '', headers: { 'Retry-After': '0' } }, { status: 204, raw: '' }], [exportAction]);
+    const t = Date.now();
+    const r = await si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } }, { retries: 1 });
+    expect(r).toEqual({ delivered: true, accepted: true, status: 204 });
+    expect(fetch.calls).toHaveLength(2);
+    expect(Date.now() - t).toBeLessThan(400);
+  });
 
   it('times out a hung hub and gives up after the retries', async () => {
     const { si, fetch } = setup(['hang'], [exportAction]);

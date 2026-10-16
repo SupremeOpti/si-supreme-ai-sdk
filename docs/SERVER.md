@@ -828,11 +828,19 @@ Request body:
 | `GET` | `/api/membership/users/{user}/organizations` | SI-374, live. Response `{ data: { user: { id }, app: { id, name }, is_superadmin, organizations: [{ id, slug, name, roles, app_grant }] }, meta: { count, generated_at } }`. Errors `401`, `403 app_inactive`, `404 user_not_found`, `429`, `500 misconfigured_key`. 600 req/min per key. |
 | `POST` | `/api/membership/audit-events` | SI-379, not live yet. Opt-in. |
 | `POST` | `/api/oauth/introspect` | SI-411, live on main. JSON `{ token }`. `200` `{"active": false}` or the active body ([principal](#the-principal)). Errors `401`, `403 app_inactive`, `422`, `429`, `500 misconfigured_key`. `Cache-Control: no-store`. |
+| `POST` | `/api/verify-session-jwt` | SI Actions (`createSiActions`). JSON `{ token }`; `200 { valid: true, claims }` confirms the hub service token's signature. `400`/`401` are final, anything else is `upstream_unavailable`. Tokens are never cached. |
+| `POST` | `/api/workflows/callbacks/{run}/{node}` (the `callback_url` the hub sends) | SI Actions async results (`siActions.completeJob`). `Authorization: Bearer <callback_token>` (single use). Body `{ status: "completed", job_id?, output }` or `{ status: "failed", job_id?, error: { code, message, retryable } }`. `200 { ok, accepted }` (`accepted: false` = invalid output, final); `401` bad or used token, `404`, `409 idempotency_conflict`, `410` run finished, `422` malformed. Retries network errors, 429 (`Retry-After`) and 5xx only. |
 | `POST` | `/api/oauth/grants/status` | SI-411, live on main. JSON `{ grant_ids: [...] }` (1–100). `200` `{ "<id>": "active" \| "revoked" \| "expired" \| "unknown" }`. Same errors. |
 
 Introspection and grant status share SI's `mcp-introspect` limit: 1200 requests per minute per key (separate from membership's 600). Contract: SI `docs/api/knowledge-lake-mcp-oauth.md` § Token introspection and grant status.
 
 The SDK validates the whole `200` body (integer ids, string slug/name/app_grant, string-array roles, `data.user.id` equal to the requested user). Any mismatch is `si_unavailable` / `malformed_response`.
+
+---
+
+## Workflow actions (SI Actions)
+
+`createSiActions` serves an app's actions to the SI Workflow Builder: the manifest at `/.well-known/si-actions.json`, `POST /si/actions/{id}`, and for async actions `GET /si/actions/{id}/jobs/{jobId}` plus `siActions.completeJob` for the callback. Usage, routes, token checks and the async flow are in the README under "Workflow actions (SI Actions)"; the SI endpoints it calls are in the table above.
 
 ---
 
