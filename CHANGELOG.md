@@ -20,7 +20,8 @@ serves an app's actions to the SI hub. Additive; the browser entry is unchanged.
   and 5xx only; any 2xx counts as delivered). `poll_url` resolves against
   `baseUrl` and must match its host and port.
 - Hub token verification times out after `verifyTimeoutMs` (default 5000 ms)
-  and answers `upstream_unavailable`.
+  and answers `upstream_unavailable`; `hubUrl` must be https (http only for a
+  loopback host).
 
 ## 1.3.0 — 2026-10-15
 

@@ -156,6 +156,8 @@ describe('createSiActions', () => {
     expect(make({ actions: [search, search] })).toThrow('duplicate');
     expect(make({ actions: [{ ...search, id: 'Bad-Id' }] })).toThrow('must match');
     expect(make({ hubUrl: 'not a url' })).toThrow('hubUrl');
+    expect(make({ hubUrl: 'http://app.supremegroup.ai' })).toThrow('https');
+    expect(make({ hubUrl: 'http://localhost:9999' })).not.toThrow();
   });
 });
 

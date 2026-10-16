@@ -1675,6 +1675,9 @@ function createSiActions(config) {
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(config.app ?? "")) throw new InvalidArgumentError("app must be the lowercase app slug");
   const baseUrl = origin(config.baseUrl, "baseUrl");
   const hubUrl = origin(config.hubUrl, "hubUrl");
+  if (!hubUrl.startsWith("https://") && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(hubUrl)) {
+    throw new InvalidArgumentError("hubUrl must use https (http is allowed for localhost only)");
+  }
   const logger = config.logger ?? consoleLogger2;
   const now = config.now ?? Date.now;
   const fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
