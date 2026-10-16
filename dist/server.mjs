@@ -329,7 +329,7 @@ function compareVersions(a, b) {
   return 0;
 }
 function createHttp(options) {
-  const sleep = options.sleep ?? defaultSleep;
+  const sleep2 = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
   const maxRetryDelayMs = options.maxRetryDelayMs ?? 1e3;
   const base = options.baseUrl.replace(/\/+$/, "");
@@ -376,16 +376,16 @@ function createHttp(options) {
         if (timedOut) throw new SiUnavailableError("timeout", `body not received within ${options.timeoutMs} ms`);
         throw new SiUnavailableError("network", "failed to read response body");
       }
-      let body;
+      let body2;
       if (text) {
         try {
-          body = JSON.parse(text);
+          body2 = JSON.parse(text);
         } catch {
-          body = void 0;
+          body2 = void 0;
         }
       }
       checkMinVersion(response.headers);
-      return { status: response.status, body, headers: response.headers };
+      return { status: response.status, body: body2, headers: response.headers };
     } finally {
       clearTimeout(timer);
     }
@@ -397,13 +397,13 @@ function createHttp(options) {
       first = await attempt(req);
     } catch (err) {
       if (!retry) throw err;
-      await sleep(jitter(random));
+      await sleep2(jitter(random));
       return attempt(req);
     }
     if (first.status < 500 || !retry || req.noRetryOn?.(first)) return first;
     const retryAfter = parseRetryAfter(first.headers.get("retry-after"));
     if (retryAfter !== null && retryAfter > maxRetryDelayMs) return first;
-    await sleep(retryAfter ?? jitter(random));
+    await sleep2(retryAfter ?? jitter(random));
     return attempt(req);
   };
 }
@@ -437,9 +437,9 @@ function parseOrganizations(value) {
   }
   return organizations;
 }
-function parseMembershipBody(body) {
-  if (!body || typeof body !== "object") return null;
-  const data = body.data;
+function parseMembershipBody(body2) {
+  if (!body2 || typeof body2 !== "object") return null;
+  const data = body2.data;
   if (!data || typeof data !== "object") return null;
   const d = data;
   const user = d.user;
@@ -449,7 +449,7 @@ function parseMembershipBody(body) {
   if (typeof d.is_superadmin !== "boolean") return null;
   const organizations = parseOrganizations(d.organizations);
   if (!organizations) return null;
-  const meta = body.meta;
+  const meta = body2.meta;
   return {
     user: { id: user.id },
     app: { id: app.id, name: app.name },
@@ -463,8 +463,8 @@ function retryAfterSeconds(result, now) {
   return ms === null ? void 0 : Math.ceil(ms / 1e3);
 }
 function errorCode(result) {
-  const body = result.body;
-  return body && typeof body === "object" && isStr(body.error) ? body.error : void 0;
+  const body2 = result.body;
+  return body2 && typeof body2 === "object" && isStr(body2.error) ? body2.error : void 0;
 }
 function isCacheEntry(v) {
   if (!v || typeof v !== "object") return false;
@@ -638,9 +638,9 @@ function requireScope(principal, scope) {
 }
 var isStr2 = (v) => typeof v === "string";
 var isInt2 = (v) => typeof v === "number" && Number.isInteger(v);
-function parseActiveIntrospection(body) {
-  if (!body || typeof body !== "object") return null;
-  const b = body;
+function parseActiveIntrospection(body2) {
+  if (!body2 || typeof body2 !== "object") return null;
+  const b = body2;
   if (b.active !== true) return null;
   if (!isStr2(b.sub) || !/^[1-9]\d{0,18}$/.test(b.sub)) return null;
   if (!isStr2(b.aud) || !isStr2(b.iss) || !isStr2(b.client_id) || !b.client_id) return null;
@@ -762,13 +762,13 @@ function createAuth(deps) {
       noRetryOn: (r) => errorCode(r) === "misconfigured_key"
     });
     if (result.status !== 200) return fail(result);
-    const body = result.body;
-    if (body && typeof body === "object" && body.active === false) throw new InvalidTokenError("inactive");
-    const data = parseActiveIntrospection(body);
+    const body2 = result.body;
+    if (body2 && typeof body2 === "object" && body2.active === false) throw new InvalidTokenError("inactive");
+    const data = parseActiveIntrospection(body2);
     if (!data) throw new SiUnavailableError("malformed_response", "introspection body did not match the contract", 200);
     const ttlSeconds = Math.min(introspectionTtl, Math.floor((data.exp * 1e3 - deps.now()) / 1e3));
     if (ttlSeconds > 0) {
-      const entry = { v: 1, at: deps.now(), ttlMs: ttlSeconds * 1e3, body };
+      const entry = { v: 1, at: deps.now(), ttlMs: ttlSeconds * 1e3, body: body2 };
       try {
         await deps.cache.set(key, entry, ttlSeconds);
       } catch {
@@ -832,12 +832,12 @@ function createAuth(deps) {
         noRetryOn: (r) => errorCode(r) === "misconfigured_key"
       });
       if (result.status !== 200) fail(result);
-      const body = result.body;
-      if (!body || typeof body !== "object" || Array.isArray(body)) {
+      const body2 = result.body;
+      if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
         throw new SiUnavailableError("malformed_response", "grant status body is not an object", 200);
       }
       for (const id of chunk) {
-        const status = Object.prototype.hasOwnProperty.call(body, id) ? body[id] : void 0;
+        const status = Object.prototype.hasOwnProperty.call(body2, id) ? body2[id] : void 0;
         if (!GRANT_STATUSES.includes(status)) {
           throw new SiUnavailableError("malformed_response", "grant status missing or unknown for a requested id", 200);
         }
@@ -1501,7 +1501,7 @@ async function verifyServiceToken(authorization, opts) {
   const localProblem = local ? checkClaims(local, opts) : "malformed token";
   if (local === null || localProblem) throw new SiActionError("unauthenticated", `Invalid service token: ${localProblem}.`);
   let status;
-  let body;
+  let body2;
   try {
     const res = await opts.fetch(`${opts.hubUrl}/api/verify-session-jwt`, {
       method: "POST",
@@ -1509,15 +1509,15 @@ async function verifyServiceToken(authorization, opts) {
       body: JSON.stringify({ token })
     });
     status = res.status;
-    body = JSON.parse(await res.text() || "null");
+    body2 = JSON.parse(await res.text() || "null");
   } catch {
     throw new SiActionError("upstream_unavailable", "Could not reach the SI hub to verify the token.");
   }
   if (status === 400 || status === 401) throw new SiActionError("unauthenticated", "The SI hub rejected the token.");
-  if (status !== 200 || !isObject(body) || body.valid !== true || !isObject(body.claims)) {
+  if (status !== 200 || !isObject(body2) || body2.valid !== true || !isObject(body2.claims)) {
     throw new SiActionError("upstream_unavailable", `The SI hub verifier answered HTTP ${status}.`);
   }
-  const claims = body.claims;
+  const claims = body2.claims;
   const same = (k) => String(claims[k]) === String(local[k]);
   if (!same("type") || !same("iss") || !same("org_id") || String(claims.user_id ?? claims.sub) !== String(local.user_id ?? local.sub)) {
     throw new SiActionError("unauthenticated", "Verified claims do not match the presented token.");
@@ -1525,16 +1525,114 @@ async function verifyServiceToken(authorization, opts) {
   return { claims: local, organizationId: Number(local.org_id), userId: Number(local.user_id ?? local.sub) };
 }
 
+// src/server/actions/callback.ts
+var LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+function checkCallbackUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    throw new InvalidArgumentError("callback url must be an absolute URL");
+  }
+  const local = LOCAL_HOSTS.has(u.hostname) || u.hostname.endsWith(".localhost");
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) {
+    throw new InvalidArgumentError("callback url must use https (http is allowed for localhost only)");
+  }
+  return u.toString();
+}
+function body(result) {
+  const job = typeof result.jobId === "string" && result.jobId !== "" ? { job_id: result.jobId } : {};
+  if (result.status === "completed") return JSON.stringify({ status: "completed", ...job, output: result.output });
+  const e = result.error ?? { code: "app_failed", message: "The job failed." };
+  return JSON.stringify({
+    status: "failed",
+    ...job,
+    error: {
+      code: String(e.code || "app_failed").slice(0, 64),
+      message: String(e.message || "The job failed.").slice(0, 2e3),
+      retryable: e.retryable === true
+    }
+  });
+}
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var retryable = (status) => status === 0 || status === 429 || status >= 500;
+async function completeCallback(callback, result, fetchImpl, options = {}) {
+  if (!callback || typeof callback.token !== "string" || callback.token === "") throw new InvalidArgumentError("callback token is required");
+  if (result?.status !== "completed" && result?.status !== "failed") throw new InvalidArgumentError("result status must be 'completed' or 'failed'");
+  if (result.status === "completed" && !isObject(result.output)) throw new InvalidArgumentError("completed output must be an object");
+  const url = checkCallbackUrl(callback.url);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? 1e4);
+  const retries = Math.max(0, Math.min(10, options.retries ?? 3));
+  const payload = body(result);
+  let last = { delivered: false, accepted: false, status: 0, code: "upstream_unavailable" };
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(500 * 2 ** (attempt - 1));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${callback.token}` },
+        body: payload,
+        signal: controller.signal
+      });
+      let parsed = null;
+      try {
+        parsed = JSON.parse(await res.text() || "null");
+      } catch {
+        parsed = null;
+      }
+      if (res.status === 200) {
+        const ok = isObject(parsed) ? parsed : {};
+        const accepted = ok.accepted !== false;
+        return {
+          delivered: true,
+          accepted,
+          status: 200,
+          ...accepted ? {} : { code: typeof ok.reason === "string" ? ok.reason : "invalid_output" },
+          ...Array.isArray(ok.errors) ? { errors: ok.errors.map(String) } : {}
+        };
+      }
+      const err = isObject(parsed) && isObject(parsed.error) ? parsed.error : null;
+      const validation = isObject(parsed) && isObject(parsed.errors) ? Object.values(parsed.errors).flat().map(String) : void 0;
+      last = {
+        delivered: false,
+        accepted: false,
+        status: res.status,
+        code: typeof err?.code === "string" ? err.code : res.status === 422 ? "validation_failed" : `http_${res.status}`,
+        ...validation ? { errors: validation } : {}
+      };
+      if (!retryable(res.status)) return last;
+    } catch {
+      last = { delivered: false, accepted: false, status: 0, code: "upstream_unavailable" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return last;
+}
+
 // src/server/actions/index.ts
 var SI_ACTIONS_VERSION = "1";
 var SI_ACTIONS_MANIFEST_PATH = "/.well-known/si-actions.json";
 var ID_PATTERN = /^[a-z0-9_]{1,48}$/;
+var JOB_ROUTE = /\/si\/actions\/([^/]+)\/jobs\/([^/]+)$/;
+function acceptSiAction(options = {}) {
+  const { jobId } = options;
+  if (jobId !== void 0 && (typeof jobId !== "string" || jobId === "" || jobId.length > 255)) {
+    throw new InvalidArgumentError("jobId must be a non-empty string of at most 255 characters");
+  }
+  return Object.freeze({ __siAccepted: true, jobId, pollUrl: options.pollUrl, estimatedSeconds: options.estimatedSeconds });
+}
+function isAccepted(value) {
+  return isObject(value) && value.__siAccepted === true;
+}
 var consoleLogger2 = {
   warn: (message, context) => context ? console.warn(message, context) : console.warn(message),
   error: (message, context) => context ? console.error(message, context) : console.error(message)
 };
-function json(status, body, extra = {}) {
-  return { status, headers: { "Content-Type": "application/json", ...extra }, body: JSON.stringify(body) };
+function json(status, body2, extra = {}) {
+  return { status, headers: { "Content-Type": "application/json", ...extra }, body: JSON.stringify(body2) };
 }
 function errorResponse(e) {
   return json(e.status, { error: { code: e.code, message: e.message, retryable: e.retryable, ...e.details ? { details: e.details } : {} } });
@@ -1546,6 +1644,9 @@ function origin(url, name) {
   } catch {
     throw new InvalidArgumentError(`${name} must be an absolute URL`);
   }
+}
+function isAsync(a) {
+  return a.execution?.mode === "async";
 }
 function int(value) {
   const n = Number(value);
@@ -1568,6 +1669,7 @@ function createSiActions(config) {
     if (a.inputSchema?.type !== "object" || a.outputSchema?.type !== "object") {
       throw new InvalidArgumentError(`action '${a.id}' schemas must be of type object`);
     }
+    if (a.getJob && a.execution?.mode !== "async") throw new InvalidArgumentError(`action '${a.id}' has getJob but is not async`);
     actions.set(a.id, a);
   }
   const manifest = () => ({
@@ -1580,35 +1682,23 @@ function createSiActions(config) {
       description: a.description,
       input_schema: a.inputSchema,
       output_schema: a.outputSchema,
+      read_only: a.annotations?.readOnlyHint === true,
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true, ...a.annotations ?? {} },
-      execution: { mode: "sync", typical_seconds: a.execution?.typicalSeconds ?? 10, max_seconds: a.execution?.maxSeconds ?? 120 },
+      execution: isAsync(a) ? { mode: "async", typical_seconds: a.execution?.typicalSeconds ?? 60, max_seconds: a.execution?.maxSeconds ?? 900 } : { mode: "sync", typical_seconds: a.execution?.typicalSeconds ?? 10, max_seconds: a.execution?.maxSeconds ?? 120 },
       examples: a.examples ?? []
     }))
   });
-  async function execute(actionId, request) {
-    const action = actions.get(actionId);
-    if (!action) throw new SiActionError("unknown_action", `Unknown action '${actionId}'.`);
-    const service = await verifyServiceToken(request.headers.get("authorization"), {
-      issuer,
-      audience,
-      app: config.app,
-      hubUrl,
-      fetch: fetchImpl,
-      nowSeconds: Math.floor(now() / 1e3)
-    });
-    let body;
-    try {
-      body = JSON.parse(await request.text() || "{}");
-    } catch {
-      throw new SiActionError("bad_request", "Body must be JSON.");
-    }
-    if (!isObject(body)) throw new SiActionError("bad_request", "Body must be a JSON object.");
-    if (body.action_id !== void 0 && body.action_id !== actionId) throw new SiActionError("bad_request", "action_id does not match the path.");
-    const input = body.input === void 0 ? {} : body.input;
-    const problems = validate(input, action.inputSchema);
-    if (problems.length > 0) throw new SiActionError("validation_failed", problems[0], { errors: problems });
+  const verify = (request) => verifyServiceToken(request.headers.get("authorization"), {
+    issuer,
+    audience,
+    app: config.app,
+    hubUrl,
+    fetch: fetchImpl,
+    nowSeconds: Math.floor(now() / 1e3)
+  });
+  function contextFrom(service, request, callback) {
     const claims = service.claims;
-    const context = {
+    return {
       organizationId: service.organizationId,
       organizationSlug: typeof claims.org_slug === "string" ? claims.org_slug : null,
       userId: service.userId,
@@ -1616,17 +1706,85 @@ function createSiActions(config) {
       runId: int(claims.run_id),
       nodeId: typeof claims.node_id === "string" ? claims.node_id : null,
       attempt: int(claims.attempt) ?? 1,
-      idempotencyKey: request.headers.get("x-si-idempotency-key")
+      idempotencyKey: request.headers.get("x-si-idempotency-key") || null,
+      callback
     };
-    const output = await action.handler(input, context);
+  }
+  function checkOutput(action, output) {
     if (!isObject(output)) throw new SiActionError("internal_error", "The action returned a non-object output.");
-    const outProblems = validate(output, action.outputSchema, "output");
-    if (outProblems.length > 0) {
-      logger.error?.("[si-sdk/actions] output does not match output_schema", { action: actionId, errors: outProblems });
+    const problems = validate(output, action.outputSchema, "output");
+    if (problems.length > 0) {
+      logger.error?.("[si-sdk/actions] output does not match output_schema", { action: action.id, errors: problems });
       throw new SiActionError("internal_error", "The action produced output that does not match its schema.");
     }
-    return json(200, { status: "completed", output });
+    return output;
   }
+  function acceptedResponse(action, accepted, request) {
+    if (!isAsync(action)) {
+      logger.error?.("[si-sdk/actions] a sync action returned acceptSiAction()", { action: action.id });
+      throw new SiActionError("internal_error", "The action failed.");
+    }
+    const called = new URL(request.url);
+    let pollUrl;
+    const raw = accepted.pollUrl ?? (action.getJob && accepted.jobId ? `/si/actions/${action.id}/jobs/${encodeURIComponent(accepted.jobId)}` : void 0);
+    if (raw !== void 0) {
+      const u = new URL(raw, called.origin);
+      if (u.hostname === called.hostname) pollUrl = u.toString();
+      else logger.warn?.("[si-sdk/actions] poll_url dropped: not on the host the hub called", { action: action.id });
+    }
+    const est = accepted.estimatedSeconds;
+    return json(202, {
+      status: "accepted",
+      ...accepted.jobId ? { job_id: accepted.jobId } : {},
+      ...pollUrl ? { poll_url: pollUrl } : {},
+      ...typeof est === "number" && Number.isFinite(est) && est > 0 ? { estimated_seconds: Math.ceil(est) } : {}
+    });
+  }
+  async function execute(actionId, request) {
+    const action = actions.get(actionId);
+    if (!action) throw new SiActionError("unknown_action", `Unknown action '${actionId}'.`);
+    const service = await verify(request);
+    let body2;
+    try {
+      body2 = JSON.parse(await request.text() || "{}");
+    } catch {
+      throw new SiActionError("bad_request", "Body must be JSON.");
+    }
+    if (!isObject(body2)) throw new SiActionError("bad_request", "Body must be a JSON object.");
+    if (body2.action_id !== void 0 && body2.action_id !== actionId) throw new SiActionError("bad_request", "action_id does not match the path.");
+    const input = body2.input === void 0 ? {} : body2.input;
+    const problems = validate(input, action.inputSchema);
+    if (problems.length > 0) throw new SiActionError("validation_failed", problems[0], { errors: problems });
+    const bodyContext = isObject(body2.context) ? body2.context : {};
+    const callback = typeof bodyContext.callback_url === "string" && typeof bodyContext.callback_token === "string" && bodyContext.callback_token !== "" ? { url: bodyContext.callback_url, token: bodyContext.callback_token } : null;
+    const context = contextFrom(service, request, callback);
+    const result = await action.handler(input, context);
+    if (isAccepted(result)) return acceptedResponse(action, result, request);
+    return json(200, { status: "completed", output: checkOutput(action, result) });
+  }
+  async function job(actionId, jobId, request) {
+    const action = actions.get(actionId);
+    if (!action) throw new SiActionError("unknown_action", `Unknown action '${actionId}'.`);
+    if (!action.getJob) throw new SiActionError("unknown_job", "This action has no pollable jobs.");
+    const context = contextFrom(await verify(request), request, null);
+    const state = await action.getJob(jobId, context);
+    if (!state) throw new SiActionError("unknown_job", "Unknown job.");
+    if (state.status === "completed") return json(200, { status: "completed", job_id: jobId, output: checkOutput(action, state.output) });
+    if (state.status === "failed") return json(200, { status: "failed", job_id: jobId, error: state.error });
+    return json(200, { status: "running", job_id: jobId, ...typeof state.progress === "number" ? { progress: state.progress } : {} });
+  }
+  const completeJob = async (actionId, callback, result, options) => {
+    const action = actions.get(actionId);
+    if (!action) throw new InvalidArgumentError(`unknown action '${actionId}'`);
+    if (result?.status === "completed") {
+      try {
+        checkOutput(action, result.output);
+      } catch {
+        return completeCallback(callback, { jobId: result.jobId, status: "failed", error: { code: "internal_error", message: "The action produced output that does not match its schema.", retryable: false } }, fetchImpl, options);
+      }
+    }
+    return completeCallback(callback, result, fetchImpl, options);
+  };
   async function handle(request) {
     let path;
     try {
@@ -1640,7 +1798,9 @@ function createSiActions(config) {
       }
       const m = /\/si\/actions\/([^/]+)$/.exec(path);
       if (request.method === "POST" && m) return await execute(decodeURIComponent(m[1]), request);
-      if (/\/si\/actions\/[^/]+\/jobs\/[^/]+$/.test(path)) throw new SiActionError("unknown_job", "This app has no async jobs.");
+      const j = JOB_ROUTE.exec(path);
+      if (request.method === "GET" && j) return await job(decodeURIComponent(j[1]), decodeURIComponent(j[2]), request);
+      if (j) throw new SiActionError("unknown_job", "Unknown job.");
       throw new SiActionError("unknown_action", "Not an SI Actions route.");
     } catch (e) {
       if (e instanceof SiActionError) return errorResponse(e);
@@ -1648,7 +1808,7 @@ function createSiActions(config) {
       return errorResponse(new SiActionError("internal_error", "The action failed."));
     }
   }
-  return { manifest, handle };
+  return { manifest, handle, completeJob };
 }
 export {
   AUDIT_EVENTS_PATH,
@@ -1681,6 +1841,7 @@ export {
   SiUnavailableError,
   SiValidationError,
   UserGoneError,
+  acceptSiAction,
   annotations,
   audienceList,
   bearerChallenge,

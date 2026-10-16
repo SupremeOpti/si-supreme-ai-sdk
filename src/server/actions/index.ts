@@ -3,7 +3,11 @@ import type { Logger } from '../types';
 import { verifyServiceToken } from './auth';
 import { SiActionError } from './errors';
 import { isObject, validate } from './schema';
-import type { SiActionContext, SiActionDefinition, SiActionRequest, SiActionResponse, SiActionsConfig } from './types';
+import { completeCallback } from './callback';
+import type {
+  SiActionAcceptOptions, SiActionAccepted, SiActionCallback, SiActionContext, SiActionDefinition, SiActionJobStatus,
+  SiActionRequest, SiActionResponse, SiActionsConfig, SiCallbackOptions, SiCallbackResult,
+} from './types';
 
 export { SiActionError } from './errors';
 export { audienceList } from './auth';
@@ -14,6 +18,7 @@ export const SI_ACTIONS_VERSION = '1';
 export const SI_ACTIONS_MANIFEST_PATH = '/.well-known/si-actions.json';
 
 const ID_PATTERN = /^[a-z0-9_]{1,48}$/;
+const JOB_ROUTE = /\/si\/actions\/([^/]+)\/jobs\/([^/]+)$/;
 
 export interface SiActions {
   /** The manifest the hub imports (`workflows:sync-capabilities`). */
@@ -23,6 +28,30 @@ export interface SiActions {
    * Anything else gets a contract 404, so mount it on those paths only.
    */
   handle(request: SiActionRequest): Promise<SiActionResponse>;
+  /**
+   * Reports an async job's result to the hub: `POST callback.url` with `Bearer callback.token`.
+   * Completed output is checked against the action's `outputSchema` first. Retries network errors,
+   * 429 and 5xx (any other 4xx is final); never throws for HTTP outcomes.
+   */
+  completeJob(
+    actionId: string,
+    callback: SiActionCallback,
+    result: { jobId?: string } & (Extract<SiActionJobStatus, { status: 'completed' }> | Extract<SiActionJobStatus, { status: 'failed' }>),
+    options?: SiCallbackOptions,
+  ): Promise<SiCallbackResult>;
+}
+
+/** Return this from an async action's handler to answer `202 { status: "accepted", job_id?, poll_url?, estimated_seconds? }`. */
+export function acceptSiAction(options: SiActionAcceptOptions = {}): SiActionAccepted {
+  const { jobId } = options;
+  if (jobId !== undefined && (typeof jobId !== 'string' || jobId === '' || jobId.length > 255)) {
+    throw new InvalidArgumentError('jobId must be a non-empty string of at most 255 characters');
+  }
+  return Object.freeze({ __siAccepted: true as const, jobId, pollUrl: options.pollUrl, estimatedSeconds: options.estimatedSeconds });
+}
+
+function isAccepted(value: unknown): value is SiActionAccepted {
+  return isObject(value) && value.__siAccepted === true;
 }
 
 const consoleLogger: Logger = {
@@ -47,6 +76,10 @@ function origin(url: string, name: string): string {
   }
 }
 
+function isAsync(a: SiActionDefinition): boolean {
+  return a.execution?.mode === 'async';
+}
+
 function int(value: unknown): number | null {
   const n = Number(value);
   return value !== undefined && value !== null && Number.isInteger(n) ? n : null;
@@ -56,7 +89,11 @@ function int(value: unknown): number | null {
  * Serves an app's actions to the SI Workflow Builder (SI Actions contract v1):
  * verifies the hub's service token, scopes every call to the token's org and
  * user, validates input and output against the declared schemas, and answers
- * in the contract's shapes. Sync actions only for now.
+ * in the contract's shapes. Async actions answer 202 via `acceptSiAction` and
+ * report later with `completeJob`.
+ *
+ * Pass `baseUrl` from env per environment (local, staging, prod): it is the
+ * manifest's `base_url`, and nothing in the SDK defaults it.
  */
 export function createSiActions(config: SiActionsConfig): SiActions {
   if (!config || typeof config !== 'object') throw new InvalidArgumentError('config is required');
@@ -76,6 +113,7 @@ export function createSiActions(config: SiActionsConfig): SiActions {
     if (a.inputSchema?.type !== 'object' || a.outputSchema?.type !== 'object') {
       throw new InvalidArgumentError(`action '${a.id}' schemas must be of type object`);
     }
+    if (a.getJob && a.execution?.mode !== 'async') throw new InvalidArgumentError(`action '${a.id}' has getJob but is not async`);
     actions.set(a.id, a);
   }
 
@@ -89,19 +127,72 @@ export function createSiActions(config: SiActionsConfig): SiActions {
       description: a.description,
       input_schema: a.inputSchema,
       output_schema: a.outputSchema,
+      read_only: a.annotations?.readOnlyHint === true,
       annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: true, ...(a.annotations ?? {}) },
-      execution: { mode: 'sync', typical_seconds: a.execution?.typicalSeconds ?? 10, max_seconds: a.execution?.maxSeconds ?? 120 },
+      execution: isAsync(a)
+        ? { mode: 'async', typical_seconds: a.execution?.typicalSeconds ?? 60, max_seconds: a.execution?.maxSeconds ?? 900 }
+        : { mode: 'sync', typical_seconds: a.execution?.typicalSeconds ?? 10, max_seconds: a.execution?.maxSeconds ?? 120 },
       examples: a.examples ?? [],
     })),
   });
+
+  const verify = (request: SiActionRequest) => verifyServiceToken(request.headers.get('authorization'), {
+    issuer, audience, app: config.app, hubUrl, fetch: fetchImpl, nowSeconds: Math.floor(now() / 1000),
+  });
+
+  function contextFrom(service: Awaited<ReturnType<typeof verify>>, request: SiActionRequest, callback: SiActionCallback | null): SiActionContext {
+    const claims = service.claims;
+    return {
+      organizationId: service.organizationId,
+      organizationSlug: typeof claims.org_slug === 'string' ? claims.org_slug : null,
+      userId: service.userId,
+      workflowId: int(claims.workflow_id),
+      runId: int(claims.run_id),
+      nodeId: typeof claims.node_id === 'string' ? claims.node_id : null,
+      attempt: int(claims.attempt) ?? 1,
+      idempotencyKey: request.headers.get('x-si-idempotency-key') || null,
+      callback,
+    };
+  }
+
+  function checkOutput(action: SiActionDefinition, output: unknown): Record<string, unknown> {
+    if (!isObject(output)) throw new SiActionError('internal_error', 'The action returned a non-object output.');
+    const problems = validate(output, action.outputSchema, 'output');
+    if (problems.length > 0) {
+      logger.error?.('[si-sdk/actions] output does not match output_schema', { action: action.id, errors: problems });
+      throw new SiActionError('internal_error', 'The action produced output that does not match its schema.');
+    }
+    return output;
+  }
+
+  function acceptedResponse(action: SiActionDefinition, accepted: SiActionAccepted, request: SiActionRequest): SiActionResponse {
+    if (!isAsync(action)) {
+      logger.error?.('[si-sdk/actions] a sync action returned acceptSiAction()', { action: action.id });
+      throw new SiActionError('internal_error', 'The action failed.');
+    }
+    const called = new URL(request.url);
+    let pollUrl: string | undefined;
+    const raw = accepted.pollUrl ?? (action.getJob && accepted.jobId ? `/si/actions/${action.id}/jobs/${encodeURIComponent(accepted.jobId)}` : undefined);
+    if (raw !== undefined) {
+      const u = new URL(raw, called.origin);
+      // The hub ignores a poll_url off the host it called, so say so here instead.
+      if (u.hostname === called.hostname) pollUrl = u.toString();
+      else logger.warn?.('[si-sdk/actions] poll_url dropped: not on the host the hub called', { action: action.id });
+    }
+    const est = accepted.estimatedSeconds;
+    return json(202, {
+      status: 'accepted',
+      ...(accepted.jobId ? { job_id: accepted.jobId } : {}),
+      ...(pollUrl ? { poll_url: pollUrl } : {}),
+      ...(typeof est === 'number' && Number.isFinite(est) && est > 0 ? { estimated_seconds: Math.ceil(est) } : {}),
+    });
+  }
 
   async function execute(actionId: string, request: SiActionRequest): Promise<SiActionResponse> {
     const action = actions.get(actionId);
     if (!action) throw new SiActionError('unknown_action', `Unknown action '${actionId}'.`);
 
-    const service = await verifyServiceToken(request.headers.get('authorization'), {
-      issuer, audience, app: config.app, hubUrl, fetch: fetchImpl, nowSeconds: Math.floor(now() / 1000),
-    });
+    const service = await verify(request);
 
     let body: unknown;
     try {
@@ -116,28 +207,42 @@ export function createSiActions(config: SiActionsConfig): SiActions {
     const problems = validate(input, action.inputSchema);
     if (problems.length > 0) throw new SiActionError('validation_failed', problems[0], { errors: problems });
 
-    const claims = service.claims;
-    const context: SiActionContext = {
-      organizationId: service.organizationId,
-      organizationSlug: typeof claims.org_slug === 'string' ? claims.org_slug : null,
-      userId: service.userId,
-      workflowId: int(claims.workflow_id),
-      runId: int(claims.run_id),
-      nodeId: typeof claims.node_id === 'string' ? claims.node_id : null,
-      attempt: int(claims.attempt) ?? 1,
-      idempotencyKey: request.headers.get('x-si-idempotency-key'),
-    };
+    const bodyContext = isObject(body.context) ? body.context : {};
+    const callback = typeof bodyContext.callback_url === 'string' && typeof bodyContext.callback_token === 'string' && bodyContext.callback_token !== ''
+      ? { url: bodyContext.callback_url, token: bodyContext.callback_token }
+      : null;
+    const context = contextFrom(service, request, callback);
 
-    const output = await action.handler(input as Record<string, unknown>, context);
-    if (!isObject(output)) throw new SiActionError('internal_error', 'The action returned a non-object output.');
-    const outProblems = validate(output, action.outputSchema, 'output');
-    if (outProblems.length > 0) {
-      logger.error?.('[si-sdk/actions] output does not match output_schema', { action: actionId, errors: outProblems });
-      throw new SiActionError('internal_error', 'The action produced output that does not match its schema.');
-    }
-
-    return json(200, { status: 'completed', output });
+    const result = await action.handler(input as Record<string, unknown>, context);
+    if (isAccepted(result)) return acceptedResponse(action, result, request);
+    return json(200, { status: 'completed', output: checkOutput(action, result) });
   }
+
+  async function job(actionId: string, jobId: string, request: SiActionRequest): Promise<SiActionResponse> {
+    const action = actions.get(actionId);
+    if (!action) throw new SiActionError('unknown_action', `Unknown action '${actionId}'.`);
+    if (!action.getJob) throw new SiActionError('unknown_job', 'This action has no pollable jobs.');
+    const context = contextFrom(await verify(request), request, null);
+    const state = await action.getJob(jobId, context);
+    if (!state) throw new SiActionError('unknown_job', 'Unknown job.');
+    if (state.status === 'completed') return json(200, { status: 'completed', job_id: jobId, output: checkOutput(action, state.output) });
+    if (state.status === 'failed') return json(200, { status: 'failed', job_id: jobId, error: state.error });
+    return json(200, { status: 'running', job_id: jobId, ...(typeof state.progress === 'number' ? { progress: state.progress } : {}) });
+  }
+
+  const completeJob: SiActions['completeJob'] = async (actionId, callback, result, options) => {
+    const action = actions.get(actionId);
+    if (!action) throw new InvalidArgumentError(`unknown action '${actionId}'`);
+    if (result?.status === 'completed') {
+      try {
+        checkOutput(action, result.output);
+      } catch {
+        // Tell the hub the job failed rather than leave the step waiting until it expires.
+        return completeCallback(callback, { jobId: result.jobId, status: 'failed', error: { code: 'internal_error', message: 'The action produced output that does not match its schema.', retryable: false } }, fetchImpl, options);
+      }
+    }
+    return completeCallback(callback, result, fetchImpl, options);
+  };
 
   async function handle(request: SiActionRequest): Promise<SiActionResponse> {
     let path: string;
@@ -153,7 +258,9 @@ export function createSiActions(config: SiActionsConfig): SiActions {
       }
       const m = /\/si\/actions\/([^/]+)$/.exec(path);
       if (request.method === 'POST' && m) return await execute(decodeURIComponent(m[1]), request);
-      if (/\/si\/actions\/[^/]+\/jobs\/[^/]+$/.test(path)) throw new SiActionError('unknown_job', 'This app has no async jobs.');
+      const j = JOB_ROUTE.exec(path);
+      if (request.method === 'GET' && j) return await job(decodeURIComponent(j[1]), decodeURIComponent(j[2]), request);
+      if (j) throw new SiActionError('unknown_job', 'Unknown job.');
       throw new SiActionError('unknown_action', 'Not an SI Actions route.');
     } catch (e) {
       if (e instanceof SiActionError) return errorResponse(e);
@@ -162,5 +269,5 @@ export function createSiActions(config: SiActionsConfig): SiActions {
     }
   }
 
-  return { manifest, handle };
+  return { manifest, handle, completeJob };
 }

@@ -13,8 +13,70 @@ export interface SiActionContext {
   runId: number | null;
   nodeId: string | null;
   attempt: number;
-  /** `X-SI-Idempotency-Key`: stable for one step of one run across retries. */
+  /**
+   * `X-SI-Idempotency-Key`: stable for one step of one run across retries. The hub
+   * sends it only for actions that are not `read_only`, so expect null on those.
+   */
   idempotencyKey: string | null;
+  /** Where to report an async job's result (from the request body). Null when the hub sent none. */
+  callback: SiActionCallback | null;
+}
+
+/** The hub's single-use completion endpoint for one step. Persist it with the job; the token is a secret. */
+export interface SiActionCallback {
+  url: string;
+  token: string;
+}
+
+/** What a handler passes to `acceptSiAction` to answer 202 and finish later. */
+export interface SiActionAcceptOptions {
+  /** Optional app id for the job. When given, the hub refuses a callback with a different `job_id` (409). */
+  jobId?: string;
+  /**
+   * Status URL the hub may poll if the callback never arrives. Absolute or path-only; it must be on the
+   * host the hub called. Defaults to `/si/actions/{id}/jobs/{jobId}` when the action has `getJob` and a jobId is set.
+   */
+  pollUrl?: string;
+  estimatedSeconds?: number;
+}
+
+export interface SiActionAccepted {
+  readonly __siAccepted: true;
+  readonly jobId?: string;
+  readonly pollUrl?: string;
+  readonly estimatedSeconds?: number;
+}
+
+export interface SiActionJobError {
+  code: string;
+  message: string;
+  retryable?: boolean;
+}
+
+/** An async job's state, as `getJob` reports it to a poll and `completeJob` reports it to the callback. */
+export type SiActionJobStatus<O = Record<string, unknown>> =
+  | { status: 'running'; progress?: number }
+  | { status: 'completed'; output: O }
+  | { status: 'failed'; error: SiActionJobError };
+
+export interface SiCallbackOptions {
+  /** Per attempt. Default 10000. */
+  timeoutMs?: number;
+  /** Extra attempts on network errors, 429 and 5xx; any other 4xx is final. Default 3. */
+  retries?: number;
+}
+
+/** Outcome of `completeJob`. It never throws for HTTP outcomes. */
+export interface SiCallbackResult {
+  /** The hub took the callback (HTTP 200). */
+  delivered: boolean;
+  /** Delivered and the output passed the hub's schema check. */
+  accepted: boolean;
+  /** Last HTTP status, 0 when the hub was unreachable. */
+  status: number;
+  /** Hub error code (`unauthenticated`, `unknown_job`, `idempotency_conflict`, `gone`, ...) or `invalid_output`. */
+  code?: string;
+  errors?: string[];
 }
 
 export interface SiActionAnnotations {
@@ -31,17 +93,26 @@ export interface SiActionDefinition<I = Record<string, unknown>, O = Record<stri
   description: string;
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
+  /** `readOnlyHint: true` also sets the manifest's `read_only`, so the hub sends no idempotency key. */
   annotations?: SiActionAnnotations;
-  /** Defaults: typical 10s, max 120s. Sync actions must answer within the hub's timeout. */
-  execution?: { typicalSeconds?: number; maxSeconds?: number };
+  /**
+   * `mode: 'async'` lets the handler return `acceptSiAction(...)` (202) and report later with
+   * `completeJob`. Defaults: sync typical 10s / max 120s, async typical 60s / max 900s.
+   */
+  execution?: { mode?: 'sync' | 'async'; typicalSeconds?: number; maxSeconds?: number };
   examples?: Array<{ input?: Record<string, unknown>; output?: Record<string, unknown> }>;
-  handler(input: I, context: SiActionContext): Promise<O>;
+  handler(input: I, context: SiActionContext): Promise<O | SiActionAccepted>;
+  /** Async only: answers the hub's poll at `GET /si/actions/{id}/jobs/{jobId}`. Scope the lookup to `context.organizationId`. */
+  getJob?(jobId: string, context: SiActionContext): Promise<SiActionJobStatus<O> | null>;
 }
 
 export interface SiActionsConfig {
   /** App slug as registered in SI, e.g. `data-library`. Tokens must be issued for this app. */
   app: string;
-  /** Public origin the hub calls, e.g. `https://library.supremegroup.ai`. Goes into the manifest as `base_url`. */
+  /**
+   * Public origin the hub calls in this environment, goes into the manifest as `base_url`. Read it
+   * from env (e.g. `process.env.SI_ACTIONS_BASE_URL`) so local, staging and prod each publish their own.
+   */
   baseUrl: string;
   /** SI hub origin that verifies service tokens, e.g. `https://app.supremegroup.ai`. */
   hubUrl: string;

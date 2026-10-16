@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@jest/globals';
-import { createSiActions, SiActionError, type SiActionDefinition, type SiActionRequest } from '../../src/server';
+import { acceptSiAction, createSiActions, SiActionError, type SiActionContext, type SiActionDefinition, type SiActionRequest } from '../../src/server';
 import { fakeFetch, silentLogger, type Reply } from './helpers';
 
 const NOW = 1_800_000_000_000;
@@ -74,7 +74,7 @@ describe('createSiActions', () => {
     }));
     expect(res.status).toBe(200);
     expect(parse(res)).toEqual({ status: 'completed', output: { count: 1 } });
-    expect(seen).toEqual({ organizationId: 18, organizationSlug: 'acme', userId: 7, workflowId: 3, runId: 55, nodeId: 'n_search', attempt: 2, idempotencyKey: '55:n_search' });
+    expect(seen).toEqual({ organizationId: 18, organizationSlug: 'acme', userId: 7, workflowId: 3, runId: 55, nodeId: 'n_search', attempt: 2, idempotencyKey: '55:n_search', callback: null });
     expect(fetch.calls[0].url).toBe('https://hub.example.com/api/verify-session-jwt');
     expect(JSON.parse(fetch.calls[0].init.body as string)).toEqual({ token: token(goodClaims()) });
   });
@@ -156,5 +156,165 @@ describe('createSiActions', () => {
     expect(make({ actions: [search, search] })).toThrow('duplicate');
     expect(make({ actions: [{ ...search, id: 'Bad-Id' }] })).toThrow('must match');
     expect(make({ hubUrl: 'not a url' })).toThrow('hubUrl');
+  });
+});
+
+const HUB_CB = 'https://hub.example.com/api/workflows/callbacks/55/n_export';
+
+const exportAction: SiActionDefinition = {
+  id: 'export_report',
+  name: 'Export report',
+  description: 'Builds a report in the background.',
+  inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
+  outputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+  execution: { mode: 'async' },
+  handler: async () => acceptSiAction({ jobId: 'job_1', estimatedSeconds: 42.2 }),
+  getJob: async (jobId, ctx) => (jobId === 'job_1' && ctx.organizationId === 18 ? { status: 'completed', output: { url: 'https://x/r.pdf' } } : null),
+};
+
+describe('read_only and idempotency', () => {
+  it('emits read_only from readOnlyHint', () => {
+    const write = { ...search, id: 'add_record', annotations: { readOnlyHint: false } };
+    const plain = { ...search, id: 'tag_record', annotations: undefined };
+    const m = setup([verified()], [search, write, plain]).si.manifest() as { actions: Array<Record<string, unknown>> };
+    expect(m.actions.map((a) => a.read_only)).toEqual([true, false, false]);
+  });
+
+  it('runs a read-only action without an idempotency key, and passes null for a write action missing one', async () => {
+    const seen: Array<string | null> = [];
+    const write = { ...search, id: 'add_record', annotations: { readOnlyHint: false }, handler: async (_i: unknown, c: SiActionContext) => { seen.push(c.idempotencyKey); return { count: 1 }; } };
+    const { si } = setup([verified()], [search, write]);
+    const ro = await si.handle(req('POST', '/si/actions/search_library', { auth: token(goodClaims()), body: { input: { query: 'x' } } }));
+    expect(ro.status).toBe(200);
+    const w = await si.handle(req('POST', '/si/actions/add_record', { auth: token(goodClaims()), body: { input: { query: 'x' } } }));
+    expect(w.status).toBe(200);
+    expect(seen).toEqual([null]);
+  });
+
+  it('publishes the configured base_url, not a default', () => {
+    const si = createSiActions({ app: 'data-library', baseUrl: 'http://localhost:3005', hubUrl: 'https://hub.example.com', actions: [search] });
+    expect(si.manifest().base_url).toBe('http://localhost:3005');
+    expect(() => createSiActions({ app: 'data-library', hubUrl: 'https://hub.example.com', actions: [search] } as never)).toThrow('baseUrl');
+  });
+});
+
+describe('async actions', () => {
+  const asyncBody = { input: { title: 'Q3' }, context: { callback_url: HUB_CB, callback_token: 'cbk_secret' } };
+
+  it('declares async execution with async defaults', () => {
+    const m = setup([verified()], [exportAction]).si.manifest() as { actions: Array<Record<string, unknown>> };
+    expect(m.actions[0].execution).toEqual({ mode: 'async', typical_seconds: 60, max_seconds: 900 });
+  });
+
+  it('answers 202 with job_id and a same-host poll_url, and hands the handler the callback', async () => {
+    let seen: SiActionContext | undefined;
+    const action = { ...exportAction, handler: async (_i: unknown, c: SiActionContext) => { seen = c; return acceptSiAction({ jobId: 'job_1', estimatedSeconds: 42.2 }); } };
+    const { si } = setup([verified()], [action]);
+    const res = await si.handle(req('POST', '/si/actions/export_report', { auth: token(goodClaims()), body: asyncBody }));
+    expect(res.status).toBe(202);
+    expect(parse(res)).toEqual({ status: 'accepted', job_id: 'job_1', poll_url: 'https://library.example.com/si/actions/export_report/jobs/job_1', estimated_seconds: 43 });
+    expect(seen?.callback).toEqual({ url: HUB_CB, token: 'cbk_secret' });
+  });
+
+  it('drops a poll_url on another host, resolves a relative one against the called host', async () => {
+    const run = async (pollUrl: string) => {
+      const action = { ...exportAction, getJob: undefined, handler: async () => acceptSiAction({ jobId: 'j', pollUrl }) };
+      const { si } = setup([verified()], [action]);
+      return parse(await si.handle(req('POST', '/si/actions/export_report', { auth: token(goodClaims()), body: asyncBody })));
+    };
+    expect(await run('https://evil.example.net/status/j')).toEqual({ status: 'accepted', job_id: 'j' });
+    expect((await run('/jobs/j')).poll_url).toBe('https://library.example.com/jobs/j');
+  });
+
+  it('refuses acceptSiAction from a sync action and an empty jobId; jobId is optional', async () => {
+    const { si } = setup([verified()], [{ ...search, handler: async () => acceptSiAction({ jobId: 'j' }) }]);
+    expect((await si.handle(req('POST', '/si/actions/search_library', { auth: token(goodClaims()), body: { input: { query: 'x' } } }))).status).toBe(500);
+    expect(() => acceptSiAction({ jobId: '' })).toThrow('jobId');
+    const bare = setup([verified()], [{ ...exportAction, handler: async () => acceptSiAction() }]).si;
+    const res = await bare.handle(req('POST', '/si/actions/export_report', { auth: token(goodClaims()), body: { input: { title: 'Q3' } } }));
+    expect(res.status).toBe(202);
+    expect(parse(res)).toEqual({ status: 'accepted' });
+  });
+
+  it('serves job polls through getJob with token verification and output checks', async () => {
+    const { si } = setup([verified()], [exportAction]);
+    const poll = (id: string, auth?: string) => si.handle(req('GET', `/si/actions/export_report/jobs/${id}`, { auth }));
+    expect((await poll('job_1')).status).toBe(401);
+    const done = await poll('job_1', token(goodClaims()));
+    expect(parse(done)).toEqual({ status: 'completed', job_id: 'job_1', output: { url: 'https://x/r.pdf' } });
+    expect(parse(await poll('job_2', token(goodClaims()))).error.code).toBe('unknown_job');
+    const running = setup([verified()], [{ ...exportAction, getJob: async () => ({ status: 'running' as const, progress: 0.5 }) }]).si;
+    expect(parse(await running.handle(req('GET', '/si/actions/export_report/jobs/job_1', { auth: token(goodClaims()) })))).toEqual({ status: 'running', job_id: 'job_1', progress: 0.5 });
+    expect(() => createSiActions({ app: 'data-library', baseUrl: 'https://a.example.com', hubUrl: 'https://h.example.com', actions: [{ ...search, getJob: exportAction.getJob }] })).toThrow('not async');
+  });
+});
+
+describe('completeJob', () => {
+  const cb = { url: HUB_CB, token: 'cbk_secret' };
+
+  it('posts the completed result with the bearer token in the hub callback shape', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+    const r = await si.completeJob('export_report', cb, { jobId: 'job_1', status: 'completed', output: { url: 'https://x/r.pdf' } });
+    expect(r).toEqual({ delivered: true, accepted: true, status: 200 });
+    expect(fetch.calls[0].url).toBe(HUB_CB);
+    expect(fetch.calls[0].init.method).toBe('POST');
+    expect(fetch.calls[0].init.headers).toMatchObject({ Authorization: 'Bearer cbk_secret', 'Content-Type': 'application/json' });
+    expect(fetch.calls[0].init.signal).toBeDefined();
+    expect(JSON.parse(fetch.calls[0].init.body as string)).toEqual({ status: 'completed', job_id: 'job_1', output: { url: 'https://x/r.pdf' } });
+  });
+
+  it('posts failures with a clipped error and reports hub-side output rejection', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: false, reason: 'invalid_output', errors: ['output.url: is required'] } }], [exportAction]);
+    const r = await si.completeJob('export_report', cb, { jobId: 'job_1', status: 'failed', error: { code: 'x'.repeat(80), message: 'm'.repeat(3000) } });
+    expect(r).toEqual({ delivered: true, accepted: false, status: 200, code: 'invalid_output', errors: ['output.url: is required'] });
+    const sent = JSON.parse(fetch.calls[0].init.body as string);
+    expect(sent.status).toBe('failed');
+    expect(sent.error.code).toHaveLength(64);
+    expect(sent.error.message).toHaveLength(2000);
+    expect(sent.error.retryable).toBe(false);
+  });
+
+  it('sends a failure instead of output that breaks the schema', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+    await si.completeJob('export_report', cb, { jobId: 'job_1', status: 'completed', output: { nope: 1 } });
+    expect(JSON.parse(fetch.calls[0].init.body as string)).toMatchObject({ status: 'failed', job_id: 'job_1', error: { code: 'internal_error' } });
+  });
+
+  it.each([
+    [401, 'unauthenticated'], [404, 'unknown_job'], [409, 'idempotency_conflict'], [410, 'gone'],
+  ])('treats HTTP %s as final', async (status, code) => {
+    const once = setup([{ status, body: { error: { code, message: 'x' } } }], [exportAction]);
+    expect(await once.si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } }, { retries: 3 })).toEqual({ delivered: false, accepted: false, status, code });
+    expect(once.fetch.calls).toHaveLength(1);
+  });
+
+  it('does not retry an accepted:false answer', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: false, reason: 'invalid_output', errors: ['e'] } }], [exportAction]);
+    expect((await si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } })).accepted).toBe(false);
+    expect(fetch.calls).toHaveLength(1);
+  });
+
+  it('retries 5xx, 429 and network errors', async () => {
+    const race = setup([{ status: 503, raw: 'down' }, new Error('ECONNRESET'), { status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+    const r = await race.si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } }, { retries: 2 });
+    expect(r.delivered).toBe(true);
+    expect(race.fetch.calls).toHaveLength(3);
+  }, 10_000);
+
+  it('times out a hung hub and gives up after the retries', async () => {
+    const { si, fetch } = setup(['hang'], [exportAction]);
+    const r = await si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } }, { timeoutMs: 20, retries: 0 });
+    expect(r).toEqual({ delivered: false, accepted: false, status: 0, code: 'upstream_unavailable' });
+    expect(fetch.calls).toHaveLength(1);
+  });
+
+  it('allows http only for localhost callback URLs', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+    const ok = { status: 'completed' as const, output: { url: 'u' } };
+    await expect(si.completeJob('export_report', { url: 'http://hub.example.com/cb', token: 't' }, ok)).rejects.toThrow('https');
+    await expect(si.completeJob('export_report', { url: HUB_CB, token: '' }, ok)).rejects.toThrow('token');
+    expect((await si.completeJob('export_report', { url: 'http://localhost:8000/api/workflows/callbacks/1/n', token: 't' }, ok)).delivered).toBe(true);
+    expect((await si.completeJob('export_report', { url: 'http://127.0.0.1:8000/cb', token: 't' }, ok)).delivered).toBe(true);
+    expect(fetch.calls).toHaveLength(2);
   });
 });

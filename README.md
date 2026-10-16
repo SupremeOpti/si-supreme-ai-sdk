@@ -1058,7 +1058,7 @@ import { createSiActions, SiActionError } from "@supreme-ai/si-sdk/server";
 
 export const siActions = createSiActions({
   app: "data-library",                         // app slug in SI
-  baseUrl: process.env.SI_ACTIONS_BASE_URL!,   // public origin the hub calls
+  baseUrl: process.env.SI_ACTIONS_BASE_URL!,   // this environment's public origin (local, staging, prod)
   hubUrl: process.env.SI_HUB_URL!,             // e.g. https://app.supremegroup.ai
   actions: [{
     id: "search_library",
@@ -1084,13 +1084,34 @@ export const GET = POST;
 
 | Route | Behaviour |
 |-------|-----------|
-| `GET /.well-known/si-actions.json` | Manifest (`si_actions_version: "1"`, `app`, `base_url`, `actions[]`), `Cache-Control: public, max-age=300` |
-| `POST /si/actions/{id}` | Body `{ action_id?, input, context }`. `200 { status: "completed", output }` |
+| `GET /.well-known/si-actions.json` | Manifest (`si_actions_version: "1"`, `app`, `base_url`, `actions[]`; each action has `read_only`, `annotations`, `execution`), `Cache-Control: public, max-age=300` |
+| `POST /si/actions/{id}` | Body `{ action_id?, input, context }`. `200 { status: "completed", output }`, or for async actions `202 { status: "accepted", job_id?, poll_url?, estimated_seconds? }` |
+| `GET /si/actions/{id}/jobs/{jobId}` | Async actions with `getJob` only. `200 { status: "running" \| "completed" \| "failed", job_id, progress?, output?, error? }` |
 | Errors | `{ error: { code, message, retryable, details? } }`: `bad_request` 400, `unauthenticated` 401, `unknown_action`/`unknown_job` 404, `validation_failed` 422, `internal_error` 500, `upstream_unavailable` 503 (retryable) |
 
 Token checks, in order: `Authorization: Bearer`, `type: "service"`, `iss` (`supreme-intelligence`), `aud` contains `si-actions` and, when the token is scoped (`si-actions:<app>`), it names this app; not expired; `org_id` and `user_id` present. Then `POST {hubUrl}/api/verify-session-jwt` confirms the signature and its claims must match. Tokens are never cached. Org, user and run context come from the token, never from the body or headers.
 
-Throw `SiActionError(code, message, details?)` from a handler for a contract error (for example `validation_failed` for a record the caller can't see). Any other exception becomes a generic `500`, and output that breaks `outputSchema` is refused. Sync actions only for now; async jobs (202, polling, callbacks) come next.
+Throw `SiActionError(code, message, details?)` from a handler for a contract error (for example `validation_failed` for a record the caller can't see). Any other exception becomes a generic `500`, and output that breaks `outputSchema` is refused.
+
+`base_url` is exactly `baseUrl` (its origin); the SDK has no default, so set `SI_ACTIONS_BASE_URL` per environment. The hub may override an app's base URL, but the manifest should still be right for the environment serving it.
+
+**Read-only actions.** `annotations.readOnlyHint: true` also publishes `read_only: true`. The hub sends `X-SI-Idempotency-Key` only for actions that are not read-only; `ctx.idempotencyKey` is `null` when the header is absent (never rejected). Dedupe write actions on it when present.
+
+**Async actions.** Set `execution: { mode: "async" }` (defaults typical 60s, max 900s), return `acceptSiAction({ jobId?, pollUrl?, estimatedSeconds? })` from the handler (with a `jobId`, the hub refuses a callback carrying a different one), persist `ctx.callback` (`{ url, token }`, the token is a secret) with the job, and report later with `siActions.completeJob`:
+
+```ts
+handler: async (input, ctx) => {
+  await queue.add({ input, org: ctx.organizationId, callback: ctx.callback });
+  return acceptSiAction({ jobId });
+},
+getJob: async (jobId, ctx) => jobs.status(jobId, ctx.organizationId), // optional poll fallback
+
+// in the worker
+await siActions.completeJob("export_report", job.callback, { jobId, status: "completed", output });
+await siActions.completeJob("export_report", job.callback, { jobId, status: "failed", error: { code: "export_failed", message: "..." } });
+```
+
+`completeJob` sends `POST {callback.url}` with `Authorization: Bearer {callback.token}` and body `{ status: "completed", job_id?, output }` or `{ status: "failed", job_id?, error: { code, message, retryable } }` (code clipped to 64, message to 2000). Completed output is checked against `outputSchema` first; output that fails is sent as a `failed` result instead. The URL must be https (http only for `localhost`, `127.0.0.1`, `[::1]`, `*.localhost`). Each attempt times out after `timeoutMs` (10s); network errors, 429 and 5xx retry up to `retries` (3) with backoff; any other 4xx (401 bad or already-used token, 404, 409, 410 run finished, 422) is final. It returns `{ delivered, accepted, status, code?, errors? }` and never throws for HTTP outcomes; `accepted: false` (hub rejected the output) is final too. `pollUrl` must be on the host the hub called (a path is resolved against it); with `getJob` and a `jobId` it defaults to `/si/actions/{id}/jobs/{jobId}`.
 
 ---
 
@@ -1113,7 +1134,7 @@ Throw `SiActionError(code, message, details?)` from a handler for a contract err
 | `createSiServerClient` | Server client: `auth`, `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
 | `requireScope`, `bearerChallenge`, `bearerToken`, `canonicalResourceUri`, `isVerifiedPrincipal` | Auth helpers (1.3.0) |
 | `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL` | Adapters and the Supabase migration |
-| `createSiActions`, `SiActionError`, `audienceList`, `validateJsonSchema`, `SI_ACTIONS_VERSION`, `SI_ACTIONS_MANIFEST_PATH` | Workflow actions (SI Actions) server |
+| `createSiActions`, `acceptSiAction`, `SiActionError`, `audienceList`, `validateJsonSchema`, `SI_ACTIONS_VERSION`, `SI_ACTIONS_MANIFEST_PATH` | Workflow actions (SI Actions) server |
 | `conversationKey`, `hashConversationKey` | Conversation-key resolver and SHA-256 hash |
 | `annotations`, `labelResult`, `errorResult`, `orgBanner` | MCP helpers |
 | `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `InvalidTokenError`, `InsufficientScopeError`, `SiValidationError`, `isSiServerError` | Errors |
@@ -1135,6 +1156,10 @@ MIT
 - Added token introspection and grant status to `@supreme-ai/si-sdk/server` (1.3.0, SI-378 v2 for SI-375 / SI-417): `si.auth.introspect` (`POST /api/oauth/introspect`; fails closed, checks `aud` and `exp`, caches `active: true` ≤ 60 s and ≤ `exp` keyed by a token hash, never caches negatives), `si.auth.grantStatus` (`POST /api/oauth/grants/status`, chunked by 100), `requireScope` / `InsufficientScopeError`, `challenge` (401 / 403 `WWW-Authenticate`, 503 + `Retry-After`), `protectedResourceMetadata` (echoes `?instance=`), new `auth` config and errors `InvalidTokenError`, `SiValidationError`; `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool` accept the introspection principal (no membership call). `SiUnavailableError` gains `retryAfterSeconds`. [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-10-16
+
+- SI Actions: manifest actions carry `read_only` (from `annotations.readOnlyHint`); `idempotencyKey` is `null` when the hub sends no key. Async actions: `execution.mode: "async"`, `acceptSiAction()` answers 202 with optional `job_id` and same-host `poll_url`, optional `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`, and `siActions.completeJob()` posts the result to the hub callback with the bearer token (https only except localhost, timeout, retries on network/429/5xx only). `baseUrl` documented as per-environment. [actions/](src/server/actions/index.ts), [callback.ts](src/server/actions/callback.ts), README "Workflow actions".
 
 ### 2026-10-15
 

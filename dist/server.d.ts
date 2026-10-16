@@ -709,8 +709,69 @@ interface SiActionContext {
     runId: number | null;
     nodeId: string | null;
     attempt: number;
-    /** `X-SI-Idempotency-Key`: stable for one step of one run across retries. */
+    /**
+     * `X-SI-Idempotency-Key`: stable for one step of one run across retries. The hub
+     * sends it only for actions that are not `read_only`, so expect null on those.
+     */
     idempotencyKey: string | null;
+    /** Where to report an async job's result (from the request body). Null when the hub sent none. */
+    callback: SiActionCallback | null;
+}
+/** The hub's single-use completion endpoint for one step. Persist it with the job; the token is a secret. */
+interface SiActionCallback {
+    url: string;
+    token: string;
+}
+/** What a handler passes to `acceptSiAction` to answer 202 and finish later. */
+interface SiActionAcceptOptions {
+    /** Optional app id for the job. When given, the hub refuses a callback with a different `job_id` (409). */
+    jobId?: string;
+    /**
+     * Status URL the hub may poll if the callback never arrives. Absolute or path-only; it must be on the
+     * host the hub called. Defaults to `/si/actions/{id}/jobs/{jobId}` when the action has `getJob` and a jobId is set.
+     */
+    pollUrl?: string;
+    estimatedSeconds?: number;
+}
+interface SiActionAccepted {
+    readonly __siAccepted: true;
+    readonly jobId?: string;
+    readonly pollUrl?: string;
+    readonly estimatedSeconds?: number;
+}
+interface SiActionJobError {
+    code: string;
+    message: string;
+    retryable?: boolean;
+}
+/** An async job's state, as `getJob` reports it to a poll and `completeJob` reports it to the callback. */
+type SiActionJobStatus<O = Record<string, unknown>> = {
+    status: 'running';
+    progress?: number;
+} | {
+    status: 'completed';
+    output: O;
+} | {
+    status: 'failed';
+    error: SiActionJobError;
+};
+interface SiCallbackOptions {
+    /** Per attempt. Default 10000. */
+    timeoutMs?: number;
+    /** Extra attempts on network errors, 429 and 5xx; any other 4xx is final. Default 3. */
+    retries?: number;
+}
+/** Outcome of `completeJob`. It never throws for HTTP outcomes. */
+interface SiCallbackResult {
+    /** The hub took the callback (HTTP 200). */
+    delivered: boolean;
+    /** Delivered and the output passed the hub's schema check. */
+    accepted: boolean;
+    /** Last HTTP status, 0 when the hub was unreachable. */
+    status: number;
+    /** Hub error code (`unauthenticated`, `unknown_job`, `idempotency_conflict`, `gone`, ...) or `invalid_output`. */
+    code?: string;
+    errors?: string[];
 }
 interface SiActionAnnotations {
     readOnlyHint?: boolean;
@@ -725,9 +786,14 @@ interface SiActionDefinition<I = Record<string, unknown>, O = Record<string, unk
     description: string;
     inputSchema: JsonSchema;
     outputSchema: JsonSchema;
+    /** `readOnlyHint: true` also sets the manifest's `read_only`, so the hub sends no idempotency key. */
     annotations?: SiActionAnnotations;
-    /** Defaults: typical 10s, max 120s. Sync actions must answer within the hub's timeout. */
+    /**
+     * `mode: 'async'` lets the handler return `acceptSiAction(...)` (202) and report later with
+     * `completeJob`. Defaults: sync typical 10s / max 120s, async typical 60s / max 900s.
+     */
     execution?: {
+        mode?: 'sync' | 'async';
         typicalSeconds?: number;
         maxSeconds?: number;
     };
@@ -735,12 +801,17 @@ interface SiActionDefinition<I = Record<string, unknown>, O = Record<string, unk
         input?: Record<string, unknown>;
         output?: Record<string, unknown>;
     }>;
-    handler(input: I, context: SiActionContext): Promise<O>;
+    handler(input: I, context: SiActionContext): Promise<O | SiActionAccepted>;
+    /** Async only: answers the hub's poll at `GET /si/actions/{id}/jobs/{jobId}`. Scope the lookup to `context.organizationId`. */
+    getJob?(jobId: string, context: SiActionContext): Promise<SiActionJobStatus<O> | null>;
 }
 interface SiActionsConfig {
     /** App slug as registered in SI, e.g. `data-library`. Tokens must be issued for this app. */
     app: string;
-    /** Public origin the hub calls, e.g. `https://library.supremegroup.ai`. Goes into the manifest as `base_url`. */
+    /**
+     * Public origin the hub calls in this environment, goes into the manifest as `base_url`. Read it
+     * from env (e.g. `process.env.SI_ACTIONS_BASE_URL`) so local, staging and prod each publish their own.
+     */
     baseUrl: string;
     /** SI hub origin that verifies service tokens, e.g. `https://app.supremegroup.ai`. */
     hubUrl: string;
@@ -800,13 +871,31 @@ interface SiActions {
      * Anything else gets a contract 404, so mount it on those paths only.
      */
     handle(request: SiActionRequest): Promise<SiActionResponse>;
+    /**
+     * Reports an async job's result to the hub: `POST callback.url` with `Bearer callback.token`.
+     * Completed output is checked against the action's `outputSchema` first. Retries network errors,
+     * 429 and 5xx (any other 4xx is final); never throws for HTTP outcomes.
+     */
+    completeJob(actionId: string, callback: SiActionCallback, result: {
+        jobId?: string;
+    } & (Extract<SiActionJobStatus, {
+        status: 'completed';
+    }> | Extract<SiActionJobStatus, {
+        status: 'failed';
+    }>), options?: SiCallbackOptions): Promise<SiCallbackResult>;
 }
+/** Return this from an async action's handler to answer `202 { status: "accepted", job_id?, poll_url?, estimated_seconds? }`. */
+declare function acceptSiAction(options?: SiActionAcceptOptions): SiActionAccepted;
 /**
  * Serves an app's actions to the SI Workflow Builder (SI Actions contract v1):
  * verifies the hub's service token, scopes every call to the token's org and
  * user, validates input and output against the declared schemas, and answers
- * in the contract's shapes. Sync actions only for now.
+ * in the contract's shapes. Async actions answer 202 via `acceptSiAction` and
+ * report later with `completeJob`.
+ *
+ * Pass `baseUrl` from env per environment (local, staging, prod): it is the
+ * manifest's `base_url`, and nothing in the SDK defaults it.
  */
 declare function createSiActions(config: SiActionsConfig): SiActions;
 
-export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type JsonSchema, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SI_ACTIONS_MANIFEST_PATH, SI_ACTIONS_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiActionAnnotations, type SiActionContext, type SiActionDefinition, SiActionError, type SiActionErrorCode, type SiActionRequest, type SiActionResponse, type SiActions, type SiActionsConfig, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, annotations, audienceList, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiActions, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore, validate as validateJsonSchema };
+export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type JsonSchema, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SI_ACTIONS_MANIFEST_PATH, SI_ACTIONS_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiActionAcceptOptions, type SiActionAccepted, type SiActionAnnotations, type SiActionCallback, type SiActionContext, type SiActionDefinition, SiActionError, type SiActionErrorCode, type SiActionJobError, type SiActionJobStatus, type SiActionRequest, type SiActionResponse, type SiActions, type SiActionsConfig, type SiCallbackOptions, type SiCallbackResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, acceptSiAction, annotations, audienceList, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiActions, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore, validate as validateJsonSchema };
