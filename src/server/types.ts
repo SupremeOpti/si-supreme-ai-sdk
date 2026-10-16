@@ -1,5 +1,6 @@
 import type { FetchLike } from './runtime';
 import type { CacheAdapter, LockStoreAdapter } from './adapters/types';
+import type { ScopeDeclaration } from './scopes';
 
 export interface Logger {
   warn(message: string, context?: Record<string, unknown>): void;
@@ -89,7 +90,24 @@ export interface AuthConfig {
   introspectionTtlSeconds?: number;
   /** Cache TTL for `active` grant statuses. Default 0 (off), max 60 s. */
   grantStatusTtlSeconds?: number;
-  /** `scopes_supported` in the PRM. */
+  /**
+   * The SI resource slug (`mcp_resources` slug, e.g. `canva`). Required with
+   * `scopes`: every declared name must be `mcp:<resourceSlug>:<verb>`.
+   */
+  resourceSlug?: string;
+  /**
+   * The app's MCP scopes, declared once (SI-419). Validated against the SI
+   * manifest contract at construction (`InvalidArgumentError`). Serves the
+   * PRM's `scopes_supported` and the manifest at `/.well-known/si-mcp-scopes.json`
+   * (`si.auth.scopeManifest()`, `scopeManifestResponse()`), and makes
+   * `si.auth.requireScope` reject undeclared names. Needs `resource`.
+   */
+  scopes?: ScopeDeclaration[];
+  /**
+   * `scopes_supported` in the PRM. Default: the names in `scopes`. With
+   * `scopes` declared it must be a subset of them (narrows what the PRM
+   * advertises, e.g. while a new scope is pending SI approval).
+   */
   scopesSupported?: string[];
   /** `resource_name` in the PRM. */
   resourceName?: string;

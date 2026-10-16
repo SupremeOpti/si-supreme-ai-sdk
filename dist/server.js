@@ -34,13 +34,17 @@ __export(server_exports, {
   InvalidTokenError: () => InvalidTokenError,
   LockStoreUnavailableError: () => LockStoreUnavailableError,
   MAX_ALLOW_TTL_SECONDS: () => MAX_ALLOW_TTL_SECONDS,
+  MAX_DECLARED_SCOPES: () => MAX_DECLARED_SCOPES,
   MAX_DENY_TTL_SECONDS: () => MAX_DENY_TTL_SECONDS,
   MAX_GRANT_STATUS_TTL_SECONDS: () => MAX_GRANT_STATUS_TTL_SECONDS,
   MAX_INTROSPECTION_TTL_SECONDS: () => MAX_INTROSPECTION_TTL_SECONDS,
+  MAX_SCOPE_MANIFEST_BYTES: () => MAX_SCOPE_MANIFEST_BYTES,
   MisconfiguredKeyError: () => MisconfiguredKeyError,
   OrgAccessDeniedError: () => OrgAccessDeniedError,
   OrgLockedError: () => OrgLockedError,
   PROTECTED_RESOURCE_METADATA_PATH: () => PROTECTED_RESOURCE_METADATA_PATH,
+  SCOPE_MANIFEST_PATH: () => SCOPE_MANIFEST_PATH,
+  SCOPE_MANIFEST_VERSION: () => SCOPE_MANIFEST_VERSION,
   SERVER_SDK_VERSION: () => SERVER_SDK_VERSION,
   SI_ACTIONS_MANIFEST_PATH: () => SI_ACTIONS_MANIFEST_PATH,
   SI_ACTIONS_VERSION: () => SI_ACTIONS_VERSION,
@@ -68,6 +72,7 @@ __export(server_exports, {
   memoryLockStore: () => memoryLockStore,
   orgBanner: () => orgBanner,
   requireScope: () => requireScope,
+  scopeManifest: () => scopeManifest,
   supabaseLockStore: () => supabaseLockStore,
   validateJsonSchema: () => validate
 });
@@ -382,7 +387,7 @@ function isSiServerError(err) {
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.4.0";
+var SERVER_SDK_VERSION = "1.5.0";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
@@ -658,19 +663,7 @@ function createMembership(deps) {
   };
 }
 
-// src/server/auth.ts
-var INTROSPECT_PATH = "/api/oauth/introspect";
-var GRANT_STATUS_PATH = "/api/oauth/grants/status";
-var PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
-var MAX_INTROSPECTION_TTL_SECONDS = 60;
-var MAX_GRANT_STATUS_TTL_SECONDS = 60;
-var GRANT_STATUS_CHUNK_SIZE = 100;
-var MAX_BACKOFF_SECONDS = 60;
-var GRANT_STATUSES = ["active", "revoked", "expired", "unknown"];
-var verified = /* @__PURE__ */ new WeakSet();
-function isVerifiedPrincipal(value) {
-  return typeof value === "object" && value !== null && verified.has(value);
-}
+// src/server/resource.ts
 function canonicalResourceUri(uri) {
   if (typeof uri !== "string" || !uri.trim()) throw new InvalidArgumentError("resource must be an absolute URI");
   if (uri.includes("#")) throw new InvalidArgumentError("resource must not have a fragment");
@@ -686,6 +679,81 @@ function canonicalResourceUri(uri) {
   }
   const path = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
   return `${url.protocol}//${url.host}${path}${url.search}`;
+}
+
+// src/server/scopes.ts
+var SCOPE_MANIFEST_PATH = "/.well-known/si-mcp-scopes.json";
+var SCOPE_MANIFEST_VERSION = 1;
+var MAX_DECLARED_SCOPES = 50;
+var MAX_SCOPE_MANIFEST_BYTES = 64 * 1024;
+var MAX_LABEL_LENGTH = 80;
+var MAX_DESCRIPTION_LENGTH = 500;
+var SLUG = /^[a-z0-9][a-z0-9_-]*$/;
+var CONTROL = /[\u0000-\u001f\u007f]/;
+var KINDS = ["required", "default", "optional"];
+var quoted = (value) => typeof value === "string" ? `"${value}"` : String(value);
+var isPlainText = (value, max) => typeof value === "string" && value.length <= max && !CONTROL.test(value);
+function scopeManifest(input) {
+  if (!input || typeof input !== "object") throw new InvalidArgumentError("scopeManifest needs { resource, resourceSlug, scopes }");
+  const { resource, resourceSlug, scopes } = input;
+  if (scopes === void 0) throw new InvalidArgumentError("no scopes declared: set auth.scopes to serve the SI scope manifest");
+  if (!Array.isArray(scopes) || scopes.length < 1 || scopes.length > MAX_DECLARED_SCOPES) {
+    throw new InvalidArgumentError(`auth.scopes must be an array of 1 to ${MAX_DECLARED_SCOPES} scope declarations`);
+  }
+  if (resource === void 0) throw new InvalidArgumentError("auth.resource is required when auth.scopes is set (the canonical MCP resource URI)");
+  const canonical = canonicalResourceUri(resource);
+  if (resourceSlug === void 0) throw new InvalidArgumentError('auth.resourceSlug is required when auth.scopes is set (the SI resource slug, e.g. "canva")');
+  if (typeof resourceSlug !== "string" || !SLUG.test(resourceSlug)) {
+    throw new InvalidArgumentError(`auth.resourceSlug ${quoted(resourceSlug)} must be the SI resource slug (lowercase letters, digits, "_" or "-", e.g. "canva")`);
+  }
+  const namePattern = new RegExp(`^mcp:${resourceSlug.replace(/[-]/g, "\\$&")}:[a-z0-9_]+$`);
+  const seen = /* @__PURE__ */ new Set();
+  let hasRequired = false;
+  const out = scopes.map((raw, i) => {
+    const at = `auth.scopes[${i}]`;
+    if (!raw || typeof raw !== "object") throw new InvalidArgumentError(`${at} must be an object { name, label, description?, kind }`);
+    const s = raw;
+    if ("status" in s) throw new InvalidArgumentError(`${at} must not set status: SI owns scope status (active, pending, deprecated)`);
+    if (typeof s.name !== "string" || !namePattern.test(s.name)) {
+      throw new InvalidArgumentError(`${at}.name ${quoted(s.name)} must match mcp:${resourceSlug}:<verb> (${namePattern.source})`);
+    }
+    if (seen.has(s.name)) throw new InvalidArgumentError(`${at}.name "${s.name}" is declared twice`);
+    seen.add(s.name);
+    const label = isPlainText(s.label, MAX_LABEL_LENGTH) ? s.label.trim() : "";
+    if (!label) throw new InvalidArgumentError(`${at}.label must be plain text of 1 to ${MAX_LABEL_LENGTH} characters`);
+    let description;
+    if (s.description !== void 0) {
+      if (!isPlainText(s.description, MAX_DESCRIPTION_LENGTH)) {
+        throw new InvalidArgumentError(`${at}.description must be plain text of at most ${MAX_DESCRIPTION_LENGTH} characters`);
+      }
+      description = s.description.trim() || void 0;
+    }
+    if (!KINDS.includes(s.kind)) throw new InvalidArgumentError(`${at}.kind must be "required", "default" or "optional"`);
+    const kind = s.kind;
+    if (kind === "required") hasRequired = true;
+    return description === void 0 ? { name: s.name, label, kind } : { name: s.name, label, description, kind };
+  });
+  if (!hasRequired) throw new InvalidArgumentError('auth.scopes must declare at least one "required" scope');
+  const manifest = { version: SCOPE_MANIFEST_VERSION, resource: canonical, scopes: out };
+  const bytes = new TextEncoder().encode(JSON.stringify(manifest)).length;
+  if (bytes > MAX_SCOPE_MANIFEST_BYTES) {
+    throw new InvalidArgumentError(`auth.scopes: the manifest is ${bytes} bytes; the SI contract allows at most ${MAX_SCOPE_MANIFEST_BYTES}`);
+  }
+  return manifest;
+}
+
+// src/server/auth.ts
+var INTROSPECT_PATH = "/api/oauth/introspect";
+var GRANT_STATUS_PATH = "/api/oauth/grants/status";
+var PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+var MAX_INTROSPECTION_TTL_SECONDS = 60;
+var MAX_GRANT_STATUS_TTL_SECONDS = 60;
+var GRANT_STATUS_CHUNK_SIZE = 100;
+var MAX_BACKOFF_SECONDS = 60;
+var GRANT_STATUSES = ["active", "revoked", "expired", "unknown"];
+var verified = /* @__PURE__ */ new WeakSet();
+function isVerifiedPrincipal(value) {
+  return typeof value === "object" && value !== null && verified.has(value);
 }
 var quote = (v) => `"${v.replace(/["\\]/g, (c) => `\\${c}`)}"`;
 function bearerChallenge(params) {
@@ -760,6 +828,15 @@ function createAuth(deps) {
   const grantTtl = cfg.grantStatusTtlSeconds === void 0 ? 0 : clampTtl(cfg.grantStatusTtlSeconds, MAX_GRANT_STATUS_TTL_SECONDS);
   const defaultResource = cfg.resource === void 0 ? void 0 : canonicalResourceUri(cfg.resource);
   const issuer = cfg.issuer ?? deps.baseUrl;
+  const declaration = cfg.scopes === void 0 ? void 0 : scopeManifest(cfg);
+  const declaredNames = declaration === void 0 ? void 0 : new Set(declaration.scopes.map((s) => s.name));
+  if (declaredNames && cfg.scopesSupported) {
+    const undeclared = cfg.scopesSupported.filter((s) => !declaredNames.has(s));
+    if (undeclared.length) {
+      throw new InvalidArgumentError(`auth.scopesSupported must be a subset of the declared auth.scopes (undeclared: ${undeclared.join(", ")})`);
+    }
+  }
+  const scopesSupported = cfg.scopesSupported?.length ? [...cfg.scopesSupported] : declaration?.scopes.map((s) => s.name);
   const inflight = /* @__PURE__ */ new Map();
   let blockedUntil = 0;
   const resourceFor = (override) => {
@@ -948,11 +1025,32 @@ function createAuth(deps) {
       authorization_servers: [issuer],
       bearer_methods_supported: ["header"]
     };
-    if (cfg.scopesSupported?.length) doc.scopes_supported = [...cfg.scopesSupported];
+    if (scopesSupported?.length) doc.scopes_supported = [...scopesSupported];
     if (cfg.resourceName) doc.resource_name = cfg.resourceName;
     if (cfg.resourceDocumentation) doc.resource_documentation = cfg.resourceDocumentation;
     if (cfg.logoUri) doc.logo_uri = cfg.logoUri;
     return doc;
+  };
+  const declared = () => {
+    if (declaration === void 0) throw new InvalidArgumentError("no scopes declared: set auth.scopes to serve the SI scope manifest");
+    return declaration;
+  };
+  const scopeManifest2 = () => {
+    const m = declared();
+    return { version: SCOPE_MANIFEST_VERSION, resource: m.resource, scopes: m.scopes.map((s) => ({ ...s })) };
+  };
+  const scopeManifestResponse = () => ({
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300" },
+    body: JSON.stringify(declared())
+  });
+  const requireDeclaredScope = (principal, scope) => {
+    if (declaredNames) {
+      for (const s of (typeof scope === "string" ? [scope] : [...scope]).map((v) => v.trim()).filter(Boolean)) {
+        if (!declaredNames.has(s)) throw new InvalidArgumentError(`requireScope: "${s}" is not a declared scope (auth.scopes)`);
+      }
+    }
+    requireScope(principal, scope);
   };
   const resourceMetadataUrl = (requestUrl) => {
     const { origin: origin2, path, query } = baseResource();
@@ -989,8 +1087,10 @@ function createAuth(deps) {
   return {
     introspect,
     grantStatus,
-    requireScope,
+    requireScope: requireDeclaredScope,
     protectedResourceMetadata,
+    scopeManifest: scopeManifest2,
+    scopeManifestResponse,
     resourceMetadataUrl,
     challenge,
     bearerToken
@@ -1936,13 +2036,17 @@ function createSiActions(config) {
   InvalidTokenError,
   LockStoreUnavailableError,
   MAX_ALLOW_TTL_SECONDS,
+  MAX_DECLARED_SCOPES,
   MAX_DENY_TTL_SECONDS,
   MAX_GRANT_STATUS_TTL_SECONDS,
   MAX_INTROSPECTION_TTL_SECONDS,
+  MAX_SCOPE_MANIFEST_BYTES,
   MisconfiguredKeyError,
   OrgAccessDeniedError,
   OrgLockedError,
   PROTECTED_RESOURCE_METADATA_PATH,
+  SCOPE_MANIFEST_PATH,
+  SCOPE_MANIFEST_VERSION,
   SERVER_SDK_VERSION,
   SI_ACTIONS_MANIFEST_PATH,
   SI_ACTIONS_VERSION,
@@ -1970,6 +2074,7 @@ function createSiActions(config) {
   memoryLockStore,
   orgBanner,
   requireScope,
+  scopeManifest,
   supabaseLockStore,
   validateJsonSchema
 });

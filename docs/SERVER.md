@@ -1,12 +1,12 @@
 # `@supreme-ai/si-sdk/server`
 
-Server-side helpers for app MCP servers and APIs that trust Supreme Intelligence (SI) for identity, membership, roles and app grants. Since 1.2.0 (SI-378); token introspection and grant status since 1.3.0.
+Server-side helpers for app MCP servers and APIs that trust Supreme Intelligence (SI) for identity, membership, roles and app grants. Since 1.2.0 (SI-378); token introspection and grant status since 1.3.0; scope declaration and the SI scope manifest since 1.5.0 (SI-419).
 
 - **Server-only.** It holds the app's secret `membership_api` key. The browser entry (`@supreme-ai/si-sdk`) never re-exports it, and bundlers that resolve the `browser` export condition get a stub that throws `@supreme-ai/si-sdk/server is server-only`.
 - **Runtime-neutral.** Only `fetch`, Web Crypto, `URL`, `TextEncoder`, `AbortController`, `setTimeout`. Runs on Node 18+, Next.js route handlers / server actions (Node and Edge runtimes), Supabase edge functions (Deno) and Workers. No runtime dependencies.
 - **Fails closed.** Network error, timeout, 5xx, `429` without a fresh cached answer, malformed body, rejected or misconfigured key, inactive app: every one is a deny (a thrown error). No code path returns "allowed" without a successful SI answer.
 
-Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#identity-who-userid-is) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [Token introspection](#token-introspection-siauth) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
+Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#identity-who-userid-is) · [Org-isolation model](#org-isolation-model-in-app-terms) · [Worked MCP tool handler](#worked-mcp-tool-handler) · [Token introspection](#token-introspection-siauth) · [Declaring scopes](#declaring-scopes) · [API](#api) · [Errors](#errors) · [Adapters](#adapters) · [Supabase lock store SQL](#supabase-lock-store) · [Audit forwarding](#audit-forwarding) · [SI endpoints used](#si-endpoints-used) · [Not in the SDK](#not-in-the-sdk) · [Version policy](#version-policy)
 
 ---
 
@@ -94,7 +94,9 @@ interface SiServerConfig {
     cache?: CacheAdapter;          // default: a separate in-process memoryCache()
     introspectionTtlSeconds?: number;  // active:true cache, default and max 60, never past exp
     grantStatusTtlSeconds?: number;    // 'active' cache, default 0 (off), max 60
-    scopesSupported?: string[];    // PRM scopes_supported
+    resourceSlug?: string;         // SI resource slug, e.g. 'canva'; required with scopes
+    scopes?: ScopeDeclaration[];   // the app's MCP scopes, declared once (1.5.0, see Declaring scopes)
+    scopesSupported?: string[];    // PRM scopes_supported; default: the names in scopes (with scopes: a subset of them)
     resourceName?: string;         // PRM resource_name
     resourceDocumentation?: string;// PRM resource_documentation
     logoUri?: string;              // PRM logo_uri
@@ -279,7 +281,8 @@ const si = createSiServerClient({
   locks: supabaseLockStore(admin),
   auth: {
     resource: 'https://studio-canvas.supremegroup.ai/mcp',   // mcp_resources.resource_uri, exactly
-    scopesSupported: ['mcp:canva:base', 'mcp:canva:storyboards', 'mcp:canva:runs'],
+    resourceSlug: 'canva',
+    scopes: CANVA_SCOPES,                                    // declared once, see Declaring scopes (1.5.0)
     resourceName: 'Studio Canvas',
   },
 });
@@ -359,6 +362,8 @@ WWW-Authenticate: Bearer error="insufficient_scope", scope="mcp:canva:base mcp:c
 
 The `scope` lists every scope the operation needs, not just the missing one, so the client's step-up request asks for a complete set.
 
+With `auth.scopes` declared (1.5.0), `si.auth.requireScope` throws `InvalidArgumentError` for a name outside the declaration: a typo is a programming error, never a 403 that sends the client to step up for a scope SI doesn't know. The standalone `requireScope` export is unchanged.
+
 ### `challenge(err, { requestUrl? })`: 401 / 403 / 503
 
 Returns `{ status, headers, body }` (runtime-neutral; build your `Response` from it):
@@ -389,7 +394,7 @@ Returns `{ status, headers, body }` (runtime-neutral; build your `Response` from
 
 - `authorization_servers` is SI's issuer: `auth.issuer`, default `baseUrl`. Set it when the issuer differs from the API origin.
 - `resource` **echoes the URL the client used**: the configured resource's origin and path, plus the query of `requestUrl` (`?instance=…`). Clients compare `resource` with the server URL they connected to. Origin and path always come from the configured resource, never the request, so a proxy that rewrites the host or path (Supabase functions behind a custom domain) can't change it.
-- `scopes_supported`, `resource_name`, `resource_documentation`, `logo_uri` come from `auth.*` and are omitted when unset.
+- `scopes_supported` lists the names declared in `auth.scopes` (1.5.0, see [Declaring scopes](#declaring-scopes)), or `auth.scopesSupported`. `resource_name`, `resource_documentation`, `logo_uri` come from `auth.*`. All are omitted when unset.
 
 Serve the same document at both variants (clients try the path-suffixed one first):
 
@@ -399,6 +404,87 @@ Serve the same document at both variants (clients try the path-suffixed one firs
 | `GET /.well-known/oauth-protected-resource` | Root. |
 
 Answer with `Content-Type: application/json` and, for browser-based clients, `Access-Control-Allow-Origin: *`.
+
+### Declaring scopes
+
+Since 1.5.0 (SI-419). An app declares its MCP scopes **once**, in `auth.scopes`, and the SDK serves the one list twice: as the PRM's `scopes_supported`, and as the **SI scope manifest** at `GET /.well-known/si-mcp-scopes.json`, which SI pulls into its resource registry (when the `mcp_resources` row is saved in Filament, by an artisan command, and daily). The manifest carries what the PRM has no fields for: a consent label, a description and the kind.
+
+Studio Canvas's eight scopes (SI `docs/api/knowledge-lake-mcp-oauth.md` § Registered app resources):
+
+```ts
+import { createSiServerClient, type ScopeDeclaration } from '@supreme-ai/si-sdk/server';
+
+const ADOBE = 'Inspect, create, edit and export content on the paired computer.';
+
+export const CANVA_SCOPES: ScopeDeclaration[] = [
+  { name: 'mcp:canva:base', label: 'Use Studio Canvas', description: 'List and read flows, create flows, add and connect nodes, read the model catalogue.', kind: 'required' },
+  { name: 'mcp:canva:storyboards', label: 'Storyboards', description: 'List, read and save storyboards.', kind: 'default' },
+  { name: 'mcp:canva:photoshop', label: 'Photoshop', description: ADOBE, kind: 'default' },
+  { name: 'mcp:canva:indesign', label: 'InDesign', description: ADOBE, kind: 'default' },
+  { name: 'mcp:canva:after_effects', label: 'After Effects', description: ADOBE, kind: 'default' },
+  { name: 'mcp:canva:premiere', label: 'Premiere', description: ADOBE, kind: 'default' },
+  { name: 'mcp:canva:illustrator', label: 'Illustrator', description: ADOBE, kind: 'default' },
+  { name: 'mcp:canva:runs', label: 'Run generations', description: "Run nodes, which spends the organization's credits.", kind: 'default' },
+];
+
+const si = createSiServerClient({
+  baseUrl: 'https://app.supremegroup.ai',
+  membershipKey: Deno.env.get('SI_MEMBERSHIP_KEY')!,
+  auth: {
+    resource: 'https://studio-canvas.supremegroup.ai/mcp',   // mcp_resources.resource_uri
+    resourceSlug: 'canva',                                   // the SI resource slug: every name is mcp:canva:<verb>
+    scopes: CANVA_SCOPES,
+    resourceName: 'Studio Canvas',
+  },
+});
+```
+
+| Field | Rule (SI-419 manifest contract v1) |
+|---|---|
+| `name` | `mcp:<resourceSlug>:<verb>`, `<verb>` matching `[a-z0-9_]+`. Unique. |
+| `label` | Required. Single-line plain text, 1–80 characters (trimmed). SI's consent screen shows it. |
+| `description` | Optional. Single-line plain text, at most 500 characters (trimmed; empty is omitted). |
+| `kind` | `required` (always granted), `default` (granted when the client asks for no scope; pre-ticked on consent), `optional` (only when asked for). At least one `required`. |
+| the list | 1–50 scopes; the serialized manifest at most 64 KB. No `status`: SI owns status (`active`, `pending`, `deprecated`). Other unknown fields are dropped. |
+
+`createSiServerClient` validates the declaration at construction and throws `InvalidArgumentError` naming the broken rule (for example `auth.scopes[3].name "mcp:other:runs" must match mcp:canva:<verb> (...)`), so an invalid manifest is never served. `auth.resource` and `auth.resourceSlug` are required with `scopes`. The standalone `scopeManifest({ resource, resourceSlug, scopes })` runs the same checks and returns the manifest, for a build step or a test.
+
+What the declaration drives:
+
+- `si.auth.protectedResourceMetadata()` lists the declared names as `scopes_supported`, in declaration order. `auth.scopesSupported` alone still works as in 1.3.0; set together with `scopes` it must be a subset of them and narrows what the PRM advertises (see the approval note below).
+- `si.auth.scopeManifest()` returns the contract JSON (below, three of the eight scopes shown). `si.auth.scopeManifestResponse()` returns `{ status: 200, headers, body }` for the well-known route: `body` is the JSON text, `headers` are `Content-Type: application/json` and `Cache-Control: public, max-age=300`. `SCOPE_MANIFEST_PATH` is `/.well-known/si-mcp-scopes.json`.
+- `si.auth.requireScope(principal, scope)` throws `InvalidArgumentError` for a name outside the declaration.
+
+```json
+{
+  "version": 1,
+  "resource": "https://studio-canvas.supremegroup.ai/mcp",
+  "scopes": [
+    { "name": "mcp:canva:base", "label": "Use Studio Canvas", "description": "List and read flows, create flows, add and connect nodes, read the model catalogue.", "kind": "required" },
+    { "name": "mcp:canva:storyboards", "label": "Storyboards", "description": "List, read and save storyboards.", "kind": "default" },
+    { "name": "mcp:canva:runs", "label": "Run generations", "description": "Run nodes, which spends the organization's credits.", "kind": "default" }
+  ]
+}
+```
+
+Serve it publicly (no auth, no token) on the resource origin. In a Supabase edge function:
+
+```ts
+import { SCOPE_MANIFEST_PATH } from '@si/server';
+
+Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  if (req.method === 'GET' && url.pathname === SCOPE_MANIFEST_PATH) {
+    const r = si.auth.scopeManifestResponse();
+    return new Response(r.body, { status: r.status, headers: r.headers });
+  }
+  // ...PRM and MCP (see Canva-style handler)
+});
+```
+
+Route `/.well-known/si-mcp-scopes.json` on the resource origin to that function the same way as the PRM paths (for Vercel, a rewrite next to the `oauth-protected-resource` ones). The manifest URL must be on the **same origin** as `resource` (https; http only for loopback in local dev and tests), and SI compares the manifest's `resource` with the row's `resource_uri` exactly, after canonicalisation. The SDK writes the canonical form of `auth.resource`.
+
+**SI approves manifest changes before users see them.** SI never lets a manifest change what users are asked to grant on its own: a new scope, or any change to an existing scope's `label`, `description` or `kind`, lands in the registry as **pending** until a superadmin approves it in Filament; a scope removed from the manifest becomes `deprecated` on approval, never deleted, and existing grants keep working. Until approval, a pending scope is neither shown on the consent screen nor granted. So a deploy that adds a scope changes nothing for users by itself. One thing to stage: a PRM that advertises the new scope before approval can make clients that request every `scopes_supported` (Claude does) ask SI for a scope it won't grant yet. Declare the scope in `scopes` (so SI pulls it) and keep `scopesSupported` at the approved names until the superadmin approves; then drop `scopesSupported`.
 
 ### Grant status (background jobs)
 
@@ -418,8 +504,9 @@ Wraps `POST /api/oauth/grants/status` for code that has a `grant_id` but no bear
 A Supabase edge function serving MCP as an SI resource (SI-417). The MCP framework is up to the app; only the SDK calls matter.
 
 ```ts
-import { annotations, createSiServerClient, supabaseLockStore } from '@si/server';
+import { annotations, createSiServerClient, SCOPE_MANIFEST_PATH, supabaseLockStore } from '@si/server';
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { CANVA_SCOPES } from '../_shared/siScopes.ts';     // the eight scopes from "Declaring scopes"
 
 const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 
@@ -429,7 +516,8 @@ const si = createSiServerClient({
   locks: supabaseLockStore(admin),
   auth: {
     resource: Deno.env.get('SI_MCP_RESOURCE')!,         // https://studio-canvas.supremegroup.ai/mcp
-    scopesSupported: ['mcp:canva:base', 'mcp:canva:storyboards', 'mcp:canva:runs'],
+    resourceSlug: 'canva',
+    scopes: CANVA_SCOPES,                                 // PRM scopes_supported + the SI scope manifest
     resourceName: 'Studio Canvas',
   },
 });
@@ -439,6 +527,12 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
+
+  // 0. SI scope manifest: public, cached 5 min. SI pulls it into the resource registry.
+  if (req.method === 'GET' && url.pathname === SCOPE_MANIFEST_PATH) {
+    const r = si.auth.scopeManifestResponse();
+    return new Response(r.body, { status: r.status, headers: r.headers });
+  }
 
   // 1. PRM, root and path-suffixed.
   if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp') {
@@ -604,9 +698,11 @@ See [Token introspection](#token-introspection-siauth).
 |---|---|---|
 | `introspect(bearer, { resource? })` | `IntrospectionPrincipal` | `POST /api/oauth/introspect`. Checks `active`, `aud`, `exp`. Caches `active: true` ≤ 60 s and ≤ `exp`, keyed by SHA-256 of the token; never caches anything else. |
 | `grantStatus(grantIds)` | `{ [grantId]: 'active' \| 'revoked' \| 'expired' \| 'unknown' }` | `POST /api/oauth/grants/status`, chunked by 100, deduped, no partial answers. Optional `active`-only cache. |
-| `requireScope(principal, scope \| scopes)` | `void` | Throws `InsufficientScopeError` (`requiredScopes`, `missingScopes`). |
+| `requireScope(principal, scope \| scopes)` | `void` | Throws `InsufficientScopeError` (`requiredScopes`, `missingScopes`). With `auth.scopes` declared, an undeclared name throws `InvalidArgumentError`. |
 | `challenge(err, { requestUrl?, resourceMetadataUrl? })` | `{ status, headers, body }` | 401 / 403 with `WWW-Authenticate`, 503 (+ `Retry-After`) when SI couldn't answer. |
-| `protectedResourceMetadata(requestUrl?)` | `ProtectedResourceMetadata` | RFC 9728 JSON; `resource` = configured resource + the request's query. |
+| `protectedResourceMetadata(requestUrl?)` | `ProtectedResourceMetadata` | RFC 9728 JSON; `resource` = configured resource + the request's query; `scopes_supported` from `auth.scopes` (or `auth.scopesSupported`). |
+| `scopeManifest()` | `ScopeManifest` | `{ version: 1, resource, scopes }` from `auth.scopes` (1.5.0, [Declaring scopes](#declaring-scopes)). `InvalidArgumentError` without a declaration. |
+| `scopeManifestResponse()` | `{ status: 200, headers, body }` | For `GET /.well-known/si-mcp-scopes.json`: the manifest as JSON text, `Content-Type: application/json`, `Cache-Control: public, max-age=300`. |
 | `resourceMetadataUrl(requestUrl?)` | `string` | Path-suffixed PRM URL for `resource_metadata`. |
 | `bearerToken(headers)` | `string \| null` | Token of `Authorization: Bearer …`. |
 
@@ -636,7 +732,7 @@ See [Token introspection](#token-introspection-siauth).
 
 ### Standalone exports
 
-`conversationKey(source, options?)`, `hashConversationKey(key)`, `labelResult`, `errorResult`, `orgBanner(org)`, `annotations`, `requireScope`, `bearerChallenge(params)`, `bearerToken(headers)`, `canonicalResourceUri(uri)`, `isVerifiedPrincipal(value)`, `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL`, `SERVER_SDK_VERSION`, constants (`MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`, `INTROSPECT_PATH`, `GRANT_STATUS_PATH`, `PROTECTED_RESOURCE_METADATA_PATH`, `MAX_INTROSPECTION_TTL_SECONDS`, `MAX_GRANT_STATUS_TTL_SECONDS`, `GRANT_STATUS_CHUNK_SIZE`) and all types.
+`conversationKey(source, options?)`, `hashConversationKey(key)`, `labelResult`, `errorResult`, `orgBanner(org)`, `annotations`, `requireScope`, `bearerChallenge(params)`, `bearerToken(headers)`, `canonicalResourceUri(uri)`, `isVerifiedPrincipal(value)`, `scopeManifest({ resource, resourceSlug, scopes })`, `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL`, `SERVER_SDK_VERSION`, constants (`MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`, `INTROSPECT_PATH`, `GRANT_STATUS_PATH`, `PROTECTED_RESOURCE_METADATA_PATH`, `MAX_INTROSPECTION_TTL_SECONDS`, `MAX_GRANT_STATUS_TTL_SECONDS`, `GRANT_STATUS_CHUNK_SIZE`, `SCOPE_MANIFEST_PATH`, `SCOPE_MANIFEST_VERSION`, `MAX_DECLARED_SCOPES`, `MAX_SCOPE_MANIFEST_BYTES`) and all types.
 
 ---
 
@@ -656,7 +752,7 @@ Every class extends `SiServerError` with a stable `code`, a `message` for logs a
 | `MisconfiguredKeyError` | `misconfigured_key` | Empty key at construction, SI `401`, or SI `500 misconfigured_key` (for introspection also: the key's app has no MCP resource). `status` tells them apart. | Alert ops; ask SI to (re)issue the key. |
 | `AppInactiveError` | `app_inactive` | SI `403 app_inactive`. | The app is switched off in SI. |
 | `LockStoreUnavailableError` | `lock_store_unavailable` | The lock store failed while a conversation key was present. | Retry later; check the store. |
-| `InvalidArgumentError` | `invalid_argument` | Bad `userId`, empty `organization`, missing `clientId` / `tool`, bad config, no `auth.resource`, a principal not created by `introspect`, bad grant ids. | Fix the caller. |
+| `InvalidArgumentError` | `invalid_argument` | Bad `userId`, empty `organization`, missing `clientId` / `tool`, bad config, no `auth.resource`, an `auth.scopes` declaration that breaks the manifest contract, a `requireScope` name outside it, a principal not created by `introspect`, bad grant ids. | Fix the caller. |
 
 ### HTTP behaviour
 
@@ -833,6 +929,8 @@ Request body:
 | `POST` | `/api/oauth/grants/status` | SI-411, live on main. JSON `{ grant_ids: [...] }` (1–100). `200` `{ "<id>": "active" \| "revoked" \| "expired" \| "unknown" }`. Same errors. |
 
 Introspection and grant status share SI's `mcp-introspect` limit: 1200 requests per minute per key (separate from membership's 600). Contract: SI `docs/api/knowledge-lake-mcp-oauth.md` § Token introspection and grant status.
+
+Served **by the app** (SI calls them, the SDK only builds the answers): `GET /.well-known/oauth-protected-resource[/<path>]` (`protectedResourceMetadata`) and `GET /.well-known/si-mcp-scopes.json` (`scopeManifestResponse`, SI-419; SI pulls it on row save, by command and daily, and a superadmin approves changes).
 
 The SDK validates the whole `200` body (integer ids, string slug/name/app_grant, string-array roles, `data.user.id` equal to the requested user). Any mismatch is `si_unavailable` / `malformed_response`.
 

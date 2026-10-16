@@ -12,7 +12,11 @@ import {
 } from './errors';
 import type { HttpClient, HttpResult } from './http';
 import { clampTtl, errorCode, parseOrganizations, retryAfterSeconds } from './membership';
+import { canonicalResourceUri } from './resource';
+import { SCOPE_MANIFEST_VERSION, scopeManifest as buildScopeManifest, type ScopeManifest, type ScopeManifestResponse } from './scopes';
 import type { AuthConfig, GrantStatus, IntrospectionPrincipal, Logger } from './types';
+
+export { canonicalResourceUri } from './resource';
 
 export const INTROSPECT_PATH = '/api/oauth/introspect';
 export const GRANT_STATUS_PATH = '/api/oauth/grants/status';
@@ -68,10 +72,18 @@ export interface AuthApi {
   introspect(bearer: string | null | undefined, options?: IntrospectOptions): Promise<IntrospectionPrincipal>;
   /** Live grant states, chunked by 100. Throws on any failed chunk (no partial answers). */
   grantStatus(grantIds: readonly string[]): Promise<Record<string, GrantStatus>>;
-  /** Throws `InsufficientScopeError` unless the principal has every scope. */
+  /**
+   * Throws `InsufficientScopeError` unless the principal has every scope.
+   * With `auth.scopes` declared, a name outside the declaration is an
+   * `InvalidArgumentError` (a programming error, never a 403 step-up).
+   */
   requireScope(principal: Pick<IntrospectionPrincipal, 'scope'>, scope: string | readonly string[]): void;
-  /** JSON for `/.well-known/oauth-protected-resource` (root and path-suffixed). */
+  /** JSON for `/.well-known/oauth-protected-resource` (root and path-suffixed). `scopes_supported` comes from `auth.scopes` unless `auth.scopesSupported` narrows it. */
   protectedResourceMetadata(requestUrl?: string): ProtectedResourceMetadata;
+  /** The SI scope manifest (contract v1) from `auth.scopes`: `{ version: 1, resource, scopes }`. Throws `InvalidArgumentError` without a declaration. */
+  scopeManifest(): ScopeManifest;
+  /** A ready-to-send `200` for `GET /.well-known/si-mcp-scopes.json`: the manifest as JSON text plus `Content-Type` and `Cache-Control: public, max-age=300`. */
+  scopeManifestResponse(): ScopeManifestResponse;
   /** The path-suffixed PRM URL for the 401 `resource_metadata` parameter. */
   resourceMetadataUrl(requestUrl?: string): string;
   /** Map an error from `introspect` / `requireScope` to a 401 / 403 / 503 answer with `WWW-Authenticate`. */
@@ -95,28 +107,6 @@ const verified = new WeakSet<object>();
 /** True for a principal returned by `si.auth.introspect` (not a copy or a look-alike). */
 export function isVerifiedPrincipal(value: unknown): value is IntrospectionPrincipal {
   return typeof value === 'object' && value !== null && verified.has(value);
-}
-
-/**
- * Canonical form of a resource URI, as SI compares them: lowercase scheme
- * and host, no default port, one trailing `/` stripped, query kept, no
- * fragment. Must be https (http only for localhost).
- */
-export function canonicalResourceUri(uri: string): string {
-  if (typeof uri !== 'string' || !uri.trim()) throw new InvalidArgumentError('resource must be an absolute URI');
-  if (uri.includes('#')) throw new InvalidArgumentError('resource must not have a fragment');
-  let url: InstanceType<typeof URL>;
-  try {
-    url = new URL(uri.trim());
-  } catch {
-    throw new InvalidArgumentError('resource must be an absolute URI');
-  }
-  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
-    throw new InvalidArgumentError('resource must use https (http is allowed for localhost only)');
-  }
-  const path = url.pathname.endsWith('/') ? url.pathname.slice(0, -1) : url.pathname;
-  return `${url.protocol}//${url.host}${path}${url.search}`;
 }
 
 const quote = (v: string) => `"${v.replace(/["\\]/g, (c) => `\\${c}`)}"`;
@@ -236,6 +226,16 @@ export function createAuth(deps: AuthDeps): AuthApi {
   const grantTtl = cfg.grantStatusTtlSeconds === undefined ? 0 : clampTtl(cfg.grantStatusTtlSeconds, MAX_GRANT_STATUS_TTL_SECONDS);
   const defaultResource = cfg.resource === undefined ? undefined : canonicalResourceUri(cfg.resource);
   const issuer = cfg.issuer ?? deps.baseUrl;
+  // SI-419: validated once, at construction; served many times.
+  const declaration = cfg.scopes === undefined ? undefined : buildScopeManifest(cfg);
+  const declaredNames = declaration === undefined ? undefined : new Set(declaration.scopes.map((s) => s.name));
+  if (declaredNames && cfg.scopesSupported) {
+    const undeclared = cfg.scopesSupported.filter((s) => !declaredNames.has(s));
+    if (undeclared.length) {
+      throw new InvalidArgumentError(`auth.scopesSupported must be a subset of the declared auth.scopes (undeclared: ${undeclared.join(', ')})`);
+    }
+  }
+  const scopesSupported = cfg.scopesSupported?.length ? [...cfg.scopesSupported] : declaration?.scopes.map((s) => s.name);
   const inflight = new Map<string, Promise<ActiveBody>>();
   let blockedUntil = 0;
 
@@ -449,11 +449,36 @@ export function createAuth(deps: AuthDeps): AuthApi {
       authorization_servers: [issuer],
       bearer_methods_supported: ['header'],
     };
-    if (cfg.scopesSupported?.length) doc.scopes_supported = [...cfg.scopesSupported];
+    if (scopesSupported?.length) doc.scopes_supported = [...scopesSupported];
     if (cfg.resourceName) doc.resource_name = cfg.resourceName;
     if (cfg.resourceDocumentation) doc.resource_documentation = cfg.resourceDocumentation;
     if (cfg.logoUri) doc.logo_uri = cfg.logoUri;
     return doc;
+  };
+
+  const declared = (): ScopeManifest => {
+    if (declaration === undefined) throw new InvalidArgumentError('no scopes declared: set auth.scopes to serve the SI scope manifest');
+    return declaration;
+  };
+
+  const scopeManifest: AuthApi['scopeManifest'] = () => {
+    const m = declared();
+    return { version: SCOPE_MANIFEST_VERSION, resource: m.resource, scopes: m.scopes.map((s) => ({ ...s })) };
+  };
+
+  const scopeManifestResponse: AuthApi['scopeManifestResponse'] = () => ({
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' },
+    body: JSON.stringify(declared()),
+  });
+
+  const requireDeclaredScope: AuthApi['requireScope'] = (principal, scope) => {
+    if (declaredNames) {
+      for (const s of (typeof scope === 'string' ? [scope] : [...scope]).map((v) => v.trim()).filter(Boolean)) {
+        if (!declaredNames.has(s)) throw new InvalidArgumentError(`requireScope: "${s}" is not a declared scope (auth.scopes)`);
+      }
+    }
+    requireScope(principal, scope);
   };
 
   const resourceMetadataUrl: AuthApi['resourceMetadataUrl'] = (requestUrl) => {
@@ -495,8 +520,10 @@ export function createAuth(deps: AuthDeps): AuthApi {
   return {
     introspect,
     grantStatus,
-    requireScope,
+    requireScope: requireDeclaredScope,
     protectedResourceMetadata,
+    scopeManifest,
+    scopeManifestResponse,
     resourceMetadataUrl,
     challenge,
     bearerToken,

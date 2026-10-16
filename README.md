@@ -151,6 +151,7 @@ Server entry (`@supreme-ai/si-sdk/server`, `createSiServerClient(config)`):
 | Auth (1.3.0) | `si.auth.introspect` | `POST /api/oauth/introspect` |
 | Auth (1.3.0) | `si.auth.grantStatus` | `POST /api/oauth/grants/status` (chunks of 100) |
 | Auth (1.3.0) | `si.auth.requireScope`, `challenge`, `protectedResourceMetadata`, `resourceMetadataUrl`, `bearerToken` | local (serve the PRM at `/.well-known/oauth-protected-resource[/<path>]`) |
+| Auth (1.5.0) | `si.auth.scopeManifest`, `scopeManifestResponse` (from `auth.scopes`, which also feeds the PRM `scopes_supported`) | local (serve at `/.well-known/si-mcp-scopes.json`; SI pulls it, SI-419) |
 | Membership | `si.membership.get`, `requireOrg`, `findOrganization`, `invalidate` | `GET /api/membership/users/{user}/organizations` |
 | Organizations | `si.organizations.resolve` (slug or id; user id or introspection principal) | via membership, or the principal's orgs |
 | MCP | `si.mcp.conversationKey`, `scopeToolCall`, `labelResult`, `errorResult`, `listOrganizationsTool`, `annotations` | via membership, or the principal's orgs |
@@ -907,12 +908,23 @@ const si = createSiServerClient({
   baseUrl: "https://app.supremegroup.ai",
   membershipKey: process.env.SI_MEMBERSHIP_KEY!,
   locks: supabaseLockStore(serviceRoleSupabase),
-  auth: { resource: "https://studio-canvas.supremegroup.ai/mcp", scopesSupported: ["mcp:canva:base", "mcp:canva:runs"] },
+  auth: {
+    resource: "https://studio-canvas.supremegroup.ai/mcp",
+    resourceSlug: "canva",                       // 1.5.0: declare the scopes once (SI-419); validated at construction
+    scopes: [
+      { name: "mcp:canva:base", label: "Use Studio Canvas", kind: "required" },
+      { name: "mcp:canva:runs", label: "Run generations", description: "Uses your organization's credits.", kind: "default" },
+    ],
+  },
 });
 
 // GET /.well-known/oauth-protected-resource and /.well-known/oauth-protected-resource/mcp
 si.auth.protectedResourceMetadata(req.url);
-// → { resource: "https://studio-canvas.supremegroup.ai/mcp?instance=broth", authorization_servers: ["https://app.supremegroup.ai"], bearer_methods_supported: ["header"], scopes_supported: [...] }
+// → { resource: "https://studio-canvas.supremegroup.ai/mcp?instance=broth", authorization_servers: ["https://app.supremegroup.ai"], bearer_methods_supported: ["header"], scopes_supported: ["mcp:canva:base", "mcp:canva:runs"] }
+
+// GET /.well-known/si-mcp-scopes.json (SCOPE_MANIFEST_PATH): the SI scope manifest, from the same declaration
+const m = si.auth.scopeManifestResponse();
+// → { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300" }, body: '{"version":1,"resource":"https://studio-canvas.supremegroup.ai/mcp","scopes":[...]}' }
 
 // Every MCP request:
 let principal;
@@ -958,6 +970,7 @@ const status = await si.auth.grantStatus([job.grant_id]); // { "<grant id>": "ac
 | `429` | `retryAfterSeconds` from `Retry-After`; SI isn't called again until it passes (cap 60 s). |
 | Scopes | `requireScope` → `InsufficientScopeError`; `challenge` answers `403` with `scope="<every required scope>"`. |
 | Grant status | Chunked by 100, deduped, no partial answers. Optional `active`-only cache (`auth.grantStatusTtlSeconds`, default off, max 60). |
+| Scopes declared once (1.5.0) | `auth.scopes` (`{ name, label, description?, kind }`, with `auth.resourceSlug`) is checked against the SI manifest contract at construction: names `mcp:<slug>:<verb>` and unique, label 1–80, description ≤ 500, kind `required` / `default` / `optional`, at least one `required`, 1–50 scopes, ≤ 64 KB; `InvalidArgumentError` otherwise. It feeds the PRM `scopes_supported` and the manifest. `si.auth.requireScope` rejects undeclared names. SI approves new or changed scopes before users see them. [docs/SERVER.md](docs/SERVER.md#declaring-scopes). |
 
 Adapters: `memoryCache()` (fine in production), `memoryLockStore()` (tests/dev only), `supabaseLockStore(client)` with the SQL in [docs/SERVER.md](docs/SERVER.md#supabase-lock-store) (also exported as `SUPABASE_LOCK_STORE_SQL`).
 
@@ -1133,13 +1146,14 @@ await siActions.completeJob("export_report", job.callback, { jobId, status: "fai
 |--------|-------------|
 | `createSiServerClient` | Server client: `auth`, `membership`, `organizations`, `mcp`, `locks`, `detection`, `audit` |
 | `requireScope`, `bearerChallenge`, `bearerToken`, `canonicalResourceUri`, `isVerifiedPrincipal` | Auth helpers (1.3.0) |
+| `scopeManifest`, `SCOPE_MANIFEST_PATH`, `SCOPE_MANIFEST_VERSION`, `MAX_DECLARED_SCOPES`, `MAX_SCOPE_MANIFEST_BYTES` | Scope declaration and the SI scope manifest (1.5.0, SI-419) |
 | `memoryCache`, `memoryLockStore`, `supabaseLockStore`, `SUPABASE_LOCK_STORE_SQL` | Adapters and the Supabase migration |
 | `createSiActions`, `acceptSiAction`, `SiActionError`, `audienceList`, `validateJsonSchema`, `SI_ACTIONS_VERSION`, `SI_ACTIONS_MANIFEST_PATH` | Workflow actions (SI Actions) server |
 | `conversationKey`, `hashConversationKey` | Conversation-key resolver and SHA-256 hash |
 | `annotations`, `labelResult`, `errorResult`, `orgBanner` | MCP helpers |
 | `SiServerError`, `OrgAccessDeniedError`, `OrgLockedError`, `UserGoneError`, `SiUnavailableError`, `MisconfiguredKeyError`, `AppInactiveError`, `LockStoreUnavailableError`, `InvalidArgumentError`, `InvalidTokenError`, `InsufficientScopeError`, `SiValidationError`, `isSiServerError` | Errors |
 | `SERVER_SDK_VERSION`, `MAX_ALLOW_TTL_SECONDS`, `MAX_DENY_TTL_SECONDS`, `DEFAULT_LOCK_TTL_SECONDS`, `DEFAULT_DETECTION_WINDOW_SECONDS`, `AUDIT_EVENTS_PATH`, `DEFAULT_CODEX_HEADERS`, `DEFAULT_SI_HEADER`, `INTROSPECT_PATH`, `GRANT_STATUS_PATH`, `PROTECTED_RESOURCE_METADATA_PATH`, `MAX_INTROSPECTION_TTL_SECONDS`, `MAX_GRANT_STATUS_TTL_SECONDS`, `GRANT_STATUS_CHUNK_SIZE` | Constants |
-| Types | `SiServerConfig`, `AuthConfig`, `IntrospectionPrincipal`, `GrantStatus`, `AuthApi`, `AuthChallenge`, `ProtectedResourceMetadata`, `Membership`, `ResolvedOrganization`, `ToolScope`, `ScopeToolCallInput`, `McpToolResult`, `AuditEvent`, `CacheAdapter`, `LockStoreAdapter`, … |
+| Types | `SiServerConfig`, `AuthConfig`, `IntrospectionPrincipal`, `GrantStatus`, `AuthApi`, `AuthChallenge`, `ProtectedResourceMetadata`, `ScopeDeclaration`, `ScopeKind`, `ScopeManifest`, `ScopeManifestResponse`, `Membership`, `ResolvedOrganization`, `ToolScope`, `ScopeToolCallInput`, `McpToolResult`, `AuditEvent`, `CacheAdapter`, `LockStoreAdapter`, … |
 
 ---
 
@@ -1155,6 +1169,7 @@ MIT
 
 ### 2026-10-16
 
+- Declare MCP scopes once in the server entry (1.5.0, SI-419): new `auth.scopes` (`{ name, label, description?, kind }`) with `auth.resourceSlug`, validated against the SI scope manifest contract at construction (`InvalidArgumentError` naming the rule). The one list feeds the PRM `scopes_supported` (an explicit `auth.scopesSupported` still works, and with `scopes` narrows the PRM to a subset) and the SI scope manifest, served by `si.auth.scopeManifest()` / `scopeManifestResponse()` at `/.well-known/si-mcp-scopes.json` (`SCOPE_MANIFEST_PATH`; `Cache-Control: public, max-age=300`). `si.auth.requireScope` rejects undeclared names. New exports `scopeManifest()`, constants and types; `canonicalResourceUri` moved to [resource.ts](src/server/resource.ts). SI approves new or changed scopes before users see them. [scopes.ts](src/server/scopes.ts), [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#declaring-scopes), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 - `completeJob` accepts loopback callback URLs only when `hubUrl` is a loopback origin; with any other `hubUrl` only https on `supremegroup.ai` or a subdomain is allowed. [callback.ts](src/server/actions/callback.ts), [actions/](src/server/actions/index.ts), [docs/SERVER.md](docs/SERVER.md).
 - SI Actions (1.4.0): manifest actions carry `read_only` (from `annotations.readOnlyHint`); `idempotencyKey` is `null` when the hub sends no key. Async actions: `execution.mode: "async"`, `acceptSiAction()` answers 202 with optional `job_id` and same-host `poll_url`, optional `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`, and `siActions.completeJob()` posts the result to the hub callback with the bearer token (https on `*.supremegroup.ai` only, or loopback when `hubUrl` is loopback; no redirects; timeout; retries on network/429/5xx only, honours `Retry-After`, any 2xx is delivered). Hub token verification times out after `verifyTimeoutMs` (5s) and answers `upstream_unavailable`; `hubUrl` must be https (http only for a loopback host). `poll_url` resolves against `baseUrl`. Server endpoints listed in [docs/SERVER.md](docs/SERVER.md#si-endpoints-used). `baseUrl` documented as per-environment. [actions/](src/server/actions/index.ts), [callback.ts](src/server/actions/callback.ts), README "Workflow actions".
 
