@@ -10,11 +10,16 @@ type CallbackResult =
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const HUB_DOMAIN = 'supremegroup.ai';
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return LOCAL_HOSTS.has(host) || host.endsWith('.localhost');
+}
+
 /**
  * The callback carries the hub's bearer token, so it may only go to an SI host: https on
- * supremegroup.ai or a subdomain, or http/https on a loopback host for local development.
+ * supremegroup.ai or a subdomain, or a loopback host when `hubUrl` is itself loopback (local development).
  */
-export function checkCallbackUrl(url: string): string {
+export function checkCallbackUrl(url: string, hubUrl: string): string {
   let u: InstanceType<typeof URL>;
   try {
     u = new URL(url);
@@ -22,10 +27,15 @@ export function checkCallbackUrl(url: string): string {
     throw new InvalidArgumentError('callback url must be an absolute URL');
   }
   const host = u.hostname.toLowerCase();
-  const local = LOCAL_HOSTS.has(host) || host.endsWith('.localhost');
-  const hub = host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`);
-  if (local ? u.protocol !== 'https:' && u.protocol !== 'http:' : !(hub && u.protocol === 'https:')) {
-    throw new InvalidArgumentError(`callback url must be https on ${HUB_DOMAIN} (or a localhost URL for local development)`);
+  const localHub = isLoopbackHost(new URL(hubUrl).hostname);
+  const local = localHub && isLoopbackHost(host) && (u.protocol === 'https:' || u.protocol === 'http:');
+  const hub = (host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`)) && u.protocol === 'https:';
+  if (!local && !hub) {
+    throw new InvalidArgumentError(
+      localHub
+        ? `callback url must be https on ${HUB_DOMAIN} or a loopback URL`
+        : `callback url must be https on ${HUB_DOMAIN}`,
+    );
   }
   return u.toString();
 }
@@ -53,12 +63,13 @@ export async function completeCallback(
   callback: SiActionCallback,
   result: CallbackResult,
   fetchImpl: FetchLike,
+  hubUrl: string,
   options: SiCallbackOptions = {},
 ): Promise<SiCallbackResult> {
   if (!callback || typeof callback.token !== 'string' || callback.token === '') throw new InvalidArgumentError('callback token is required');
   if (result?.status !== 'completed' && result?.status !== 'failed') throw new InvalidArgumentError("result status must be 'completed' or 'failed'");
   if (result.status === 'completed' && !isObject(result.output)) throw new InvalidArgumentError('completed output must be an object');
-  const url = checkCallbackUrl(callback.url);
+  const url = checkCallbackUrl(callback.url, hubUrl);
   const timeoutMs = Math.max(1, options.timeoutMs ?? 10_000);
   const retries = Math.max(0, Math.min(10, options.retries ?? 3));
   const payload = body(result);

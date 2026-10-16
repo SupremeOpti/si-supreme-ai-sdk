@@ -1609,7 +1609,11 @@ async function verifyServiceToken(authorization, opts) {
 // src/server/actions/callback.ts
 var LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 var HUB_DOMAIN = "supremegroup.ai";
-function checkCallbackUrl(url) {
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase();
+  return LOCAL_HOSTS.has(host) || host.endsWith(".localhost");
+}
+function checkCallbackUrl(url, hubUrl) {
   let u;
   try {
     u = new URL(url);
@@ -1617,10 +1621,13 @@ function checkCallbackUrl(url) {
     throw new InvalidArgumentError("callback url must be an absolute URL");
   }
   const host = u.hostname.toLowerCase();
-  const local = LOCAL_HOSTS.has(host) || host.endsWith(".localhost");
-  const hub = host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`);
-  if (local ? u.protocol !== "https:" && u.protocol !== "http:" : !(hub && u.protocol === "https:")) {
-    throw new InvalidArgumentError(`callback url must be https on ${HUB_DOMAIN} (or a localhost URL for local development)`);
+  const localHub = isLoopbackHost(new URL(hubUrl).hostname);
+  const local = localHub && isLoopbackHost(host) && (u.protocol === "https:" || u.protocol === "http:");
+  const hub = (host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`)) && u.protocol === "https:";
+  if (!local && !hub) {
+    throw new InvalidArgumentError(
+      localHub ? `callback url must be https on ${HUB_DOMAIN} or a loopback URL` : `callback url must be https on ${HUB_DOMAIN}`
+    );
   }
   return u.toString();
 }
@@ -1640,11 +1647,11 @@ function body(result) {
 }
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 var retryable = (status) => status === 0 || status === 429 || status >= 500;
-async function completeCallback(callback, result, fetchImpl, options = {}) {
+async function completeCallback(callback, result, fetchImpl, hubUrl, options = {}) {
   if (!callback || typeof callback.token !== "string" || callback.token === "") throw new InvalidArgumentError("callback token is required");
   if (result?.status !== "completed" && result?.status !== "failed") throw new InvalidArgumentError("result status must be 'completed' or 'failed'");
   if (result.status === "completed" && !isObject(result.output)) throw new InvalidArgumentError("completed output must be an object");
-  const url = checkCallbackUrl(callback.url);
+  const url = checkCallbackUrl(callback.url, hubUrl);
   const timeoutMs = Math.max(1, options.timeoutMs ?? 1e4);
   const retries = Math.max(0, Math.min(10, options.retries ?? 3));
   const payload = body(result);
@@ -1883,10 +1890,10 @@ function createSiActions(config) {
       try {
         checkOutput(action, result.output);
       } catch {
-        return completeCallback(callback, { jobId: result.jobId, status: "failed", error: { code: "internal_error", message: "The action produced output that does not match its schema.", retryable: false } }, fetchImpl, options);
+        return completeCallback(callback, { jobId: result.jobId, status: "failed", error: { code: "internal_error", message: "The action produced output that does not match its schema.", retryable: false } }, fetchImpl, hubUrl, options);
       }
     }
-    return completeCallback(callback, result, fetchImpl, options);
+    return completeCallback(callback, result, fetchImpl, hubUrl, options);
   };
   async function handle(request) {
     let path;

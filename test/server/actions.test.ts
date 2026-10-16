@@ -27,10 +27,10 @@ const search: SiActionDefinition = {
   handler: async (input, ctx) => ({ count: String(input.query).length + ctx.organizationId }),
 };
 
-function setup(replies: Reply[], actions: SiActionDefinition[] = [search]) {
+function setup(replies: Reply[], actions: SiActionDefinition[] = [search], hubUrl = 'https://hub.example.com') {
   const fetch = fakeFetch(...replies);
   const si = createSiActions({
-    app: 'data-library', baseUrl: 'https://library.example.com/ignored', hubUrl: 'https://hub.example.com',
+    app: 'data-library', baseUrl: 'https://library.example.com/ignored', hubUrl,
     actions, fetch, logger: silentLogger(), now: () => NOW,
   });
   return { si, fetch };
@@ -328,16 +328,26 @@ describe('completeJob', () => {
     expect(fetch.calls).toHaveLength(1);
   });
 
-  it('sends callbacks only to supremegroup.ai over https, or to localhost', async () => {
-    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+  it('sends callbacks only to supremegroup.ai over https when hubUrl is not loopback', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }], [exportAction]);
     const ok = { status: 'completed' as const, output: { url: 'u' } };
-    for (const url of ['http://app.supremegroup.ai/cb', 'https://hub.example.com/cb', 'https://supremegroup.ai.evil.com/cb', 'https://evilsupremegroup.ai/cb', 'https://10.0.0.5/cb']) {
+    for (const url of ['http://app.supremegroup.ai/cb', 'https://hub.example.com/cb', 'https://supremegroup.ai.evil.com/cb', 'https://evilsupremegroup.ai/cb', 'https://10.0.0.5/cb', 'http://localhost:8000/cb', 'http://127.0.0.1:6379/cb', 'https://[::1]/cb', 'http://redis.localhost/cb']) {
       await expect(si.completeJob('export_report', { url, token: 't' }, ok)).rejects.toThrow('supremegroup.ai');
     }
     expect((await si.completeJob('export_report', { url: 'https://v2.supremegroup.ai/api/workflows/callbacks/1/n', token: 't' }, ok)).delivered).toBe(true);
     await expect(si.completeJob('export_report', { url: HUB_CB, token: '' }, ok)).rejects.toThrow('token');
+    expect(fetch.calls).toHaveLength(1);
+  });
+
+  it('allows loopback callbacks only when hubUrl is loopback', async () => {
+    const replies = [{ status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }];
+    const { si, fetch } = setup(replies, [exportAction], 'http://localhost:8000');
+    const ok = { status: 'completed' as const, output: { url: 'u' } };
     expect((await si.completeJob('export_report', { url: 'http://localhost:8000/api/workflows/callbacks/1/n', token: 't' }, ok)).delivered).toBe(true);
     expect((await si.completeJob('export_report', { url: 'http://127.0.0.1:8000/cb', token: 't' }, ok)).delivered).toBe(true);
+    expect((await si.completeJob('export_report', { url: 'https://v2.supremegroup.ai/cb', token: 't' }, ok)).delivered).toBe(true);
+    await expect(si.completeJob('export_report', { url: 'https://hub.example.com/cb', token: 't' }, ok)).rejects.toThrow('loopback');
+    await expect(si.completeJob('export_report', { url: 'ftp://localhost/cb', token: 't' }, ok)).rejects.toThrow('loopback');
     expect(fetch.calls).toHaveLength(3);
   });
 

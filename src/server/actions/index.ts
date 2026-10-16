@@ -249,10 +249,10 @@ export function createSiActions(config: SiActionsConfig): SiActions {
         checkOutput(action, result.output);
       } catch {
         // Tell the hub the job failed rather than leave the step waiting until it expires.
-        return completeCallback(callback, { jobId: result.jobId, status: 'failed', error: { code: 'internal_error', message: 'The action produced output that does not match its schema.', retryable: false } }, fetchImpl, options);
+        return completeCallback(callback, { jobId: result.jobId, status: 'failed', error: { code: 'internal_error', message: 'The action produced output that does not match its schema.', retryable: false } }, fetchImpl, hubUrl, options);
       }
     }
-    return completeCallback(callback, result, fetchImpl, options);
+    return completeCallback(callback, result, fetchImpl, hubUrl, options);
   };
 
   async function handle(request: SiActionRequest): Promise<SiActionResponse> {

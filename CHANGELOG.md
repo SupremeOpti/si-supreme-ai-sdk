@@ -16,7 +16,8 @@ serves an app's actions to the SI hub. Additive; the browser entry is unchanged.
   with optional `job_id`, same-host `poll_url` and `estimated_seconds`; optional
   `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`; `siActions.completeJob()`
   posts the result to the hub callback with the bearer token (https on
-  `supremegroup.ai` or a subdomain only, or localhost; redirects refused; timeout, retries on network errors, 429 (honouring `Retry-After`)
+  `supremegroup.ai` or a subdomain only, or a loopback host when `hubUrl` is
+  itself loopback; redirects refused; timeout, retries on network errors, 429 (honouring `Retry-After`)
   and 5xx only; any 2xx counts as delivered). `poll_url` resolves against
   `baseUrl` and must match its host and port.
 - Hub token verification times out after `verifyTimeoutMs` (default 5000 ms)
