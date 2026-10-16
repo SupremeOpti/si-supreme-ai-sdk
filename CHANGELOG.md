@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0 — 2026-10-16
+
+SI Workflow Builder actions for `@supreme-ai/si-sdk/server`: `createSiActions`
+serves an app's actions to the SI hub. Additive; the browser entry is unchanged.
+
+- `createSiActions(config)`: manifest at `/.well-known/si-actions.json`, hub
+  service-token verification (scoped `aud`), input/output schema validation and
+  contract errors. `baseUrl` has no default; set it per environment
+  (`SI_ACTIONS_BASE_URL`).
+- Manifest actions carry `read_only` (from `annotations.readOnlyHint`). The hub
+  sends `X-SI-Idempotency-Key` only for write actions; `ctx.idempotencyKey` is
+  `null` when absent.
+- Async actions: `execution: { mode: "async" }`, `acceptSiAction()` answers 202
+  with optional `job_id`, same-host `poll_url` and `estimated_seconds`; optional
+  `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`; `siActions.completeJob()`
+  posts the result to the hub callback with the bearer token (https only except
+  localhost, timeout, retries on network errors, 429 and 5xx only).
+
 ## 1.3.0 — 2026-10-15
 
 Token introspection and grant status for `@supreme-ai/si-sdk/server`

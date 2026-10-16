@@ -219,7 +219,7 @@ interface SiServerConfig {
     now?: () => number;
 }
 
-declare const SERVER_SDK_VERSION = "1.3.0";
+declare const SERVER_SDK_VERSION = "1.4.0";
 
 declare const AUDIT_EVENTS_PATH = "/api/membership/audit-events";
 interface AuditApi {

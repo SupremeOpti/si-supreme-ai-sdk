@@ -1151,18 +1151,15 @@ MIT
 
 ## Changelog
 
-### 2026-10-15
-
-- Added token introspection and grant status to `@supreme-ai/si-sdk/server` (1.3.0, SI-378 v2 for SI-375 / SI-417): `si.auth.introspect` (`POST /api/oauth/introspect`; fails closed, checks `aud` and `exp`, caches `active: true` ≤ 60 s and ≤ `exp` keyed by a token hash, never caches negatives), `si.auth.grantStatus` (`POST /api/oauth/grants/status`, chunked by 100), `requireScope` / `InsufficientScopeError`, `challenge` (401 / 403 `WWW-Authenticate`, 503 + `Retry-After`), `protectedResourceMetadata` (echoes `?instance=`), new `auth` config and errors `InvalidTokenError`, `SiValidationError`; `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool` accept the introspection principal (no membership call). `SiUnavailableError` gains `retryAfterSeconds`. [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
-
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
 
 ### 2026-10-16
 
-- SI Actions: manifest actions carry `read_only` (from `annotations.readOnlyHint`); `idempotencyKey` is `null` when the hub sends no key. Async actions: `execution.mode: "async"`, `acceptSiAction()` answers 202 with optional `job_id` and same-host `poll_url`, optional `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`, and `siActions.completeJob()` posts the result to the hub callback with the bearer token (https only except localhost, timeout, retries on network/429/5xx only). `baseUrl` documented as per-environment. [actions/](src/server/actions/index.ts), [callback.ts](src/server/actions/callback.ts), README "Workflow actions".
+- SI Actions (1.4.0): manifest actions carry `read_only` (from `annotations.readOnlyHint`); `idempotencyKey` is `null` when the hub sends no key. Async actions: `execution.mode: "async"`, `acceptSiAction()` answers 202 with optional `job_id` and same-host `poll_url`, optional `getJob` serves `GET /si/actions/{id}/jobs/{jobId}`, and `siActions.completeJob()` posts the result to the hub callback with the bearer token (https only except localhost, timeout, retries on network/429/5xx only). `baseUrl` documented as per-environment. [actions/](src/server/actions/index.ts), [callback.ts](src/server/actions/callback.ts), README "Workflow actions".
 
 ### 2026-10-15
 
+- Added token introspection and grant status to `@supreme-ai/si-sdk/server` (1.3.0, SI-378 v2 for SI-375 / SI-417): `si.auth.introspect` (`POST /api/oauth/introspect`; fails closed, checks `aud` and `exp`, caches `active: true` ≤ 60 s and ≤ `exp` keyed by a token hash, never caches negatives), `si.auth.grantStatus` (`POST /api/oauth/grants/status`, chunked by 100), `requireScope` / `InsufficientScopeError`, `challenge` (401 / 403 `WWW-Authenticate`, 503 + `Retry-After`), `protectedResourceMetadata` (echoes `?instance=`), new `auth` config and errors `InvalidTokenError`, `SiValidationError`; `scopeToolCall`, `organizations.resolve` and `listOrganizationsTool` accept the introspection principal (no membership call). `SiUnavailableError` gains `retryAfterSeconds`. [auth.ts](src/server/auth.ts), [docs/SERVER.md](docs/SERVER.md#token-introspection-siauth), [Server entry](#server-entry), [SKILL.md](SKILL.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 - Add `createSiActions` to the server entry: serves an app's actions to the SI Workflow Builder (manifest, hub service-token verification, input/output validation, contract errors). Sync actions only. [actions/](src/server/actions/index.ts), README "Workflow actions".
 
 ### 2026-10-07

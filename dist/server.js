@@ -382,7 +382,7 @@ function isSiServerError(err) {
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.3.0";
+var SERVER_SDK_VERSION = "1.4.0";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
