@@ -1577,16 +1577,22 @@ async function verifyServiceToken(authorization, opts) {
   if (local === null || localProblem) throw new SiActionError("unauthenticated", `Invalid service token: ${localProblem}.`);
   let status;
   let body2;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
   try {
     const res = await opts.fetch(`${opts.hubUrl}/api/verify-session-jwt`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ token })
+      body: JSON.stringify({ token }),
+      redirect: "manual",
+      signal: controller.signal
     });
     status = res.status;
     body2 = JSON.parse(await res.text() || "null");
   } catch {
     throw new SiActionError("upstream_unavailable", "Could not reach the SI hub to verify the token.");
+  } finally {
+    clearTimeout(timer);
   }
   if (status === 400 || status === 401) throw new SiActionError("unauthenticated", "The SI hub rejected the token.");
   if (status !== 200 || !isObject(body2) || body2.valid !== true || !isObject(body2.claims)) {
@@ -1602,6 +1608,7 @@ async function verifyServiceToken(authorization, opts) {
 
 // src/server/actions/callback.ts
 var LOCAL_HOSTS = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+var HUB_DOMAIN = "supremegroup.ai";
 function checkCallbackUrl(url) {
   let u;
   try {
@@ -1609,9 +1616,11 @@ function checkCallbackUrl(url) {
   } catch {
     throw new InvalidArgumentError("callback url must be an absolute URL");
   }
-  const local = LOCAL_HOSTS.has(u.hostname) || u.hostname.endsWith(".localhost");
-  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) {
-    throw new InvalidArgumentError("callback url must use https (http is allowed for localhost only)");
+  const host = u.hostname.toLowerCase();
+  const local = LOCAL_HOSTS.has(host) || host.endsWith(".localhost");
+  const hub = host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`);
+  if (local ? u.protocol !== "https:" && u.protocol !== "http:" : !(hub && u.protocol === "https:")) {
+    throw new InvalidArgumentError(`callback url must be https on ${HUB_DOMAIN} (or a localhost URL for local development)`);
   }
   return u.toString();
 }
@@ -1651,8 +1660,13 @@ async function completeCallback(callback, result, fetchImpl, options = {}) {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${callback.token}` },
         body: payload,
+        // Never follow a redirect: it could carry the bearer token to another host.
+        redirect: "manual",
         signal: controller.signal
       });
+      if (res.status >= 300 && res.status < 400) {
+        return { delivered: false, accepted: false, status: res.status, code: "redirect_refused" };
+      }
       let parsed = null;
       try {
         parsed = JSON.parse(await res.text() || "null");
@@ -1741,6 +1755,7 @@ function createSiActions(config) {
   const fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
   const issuer = config.issuer ?? "supreme-intelligence";
   const audience = config.audience ?? "si-actions";
+  const verifyTimeoutMs = Math.max(1, config.verifyTimeoutMs ?? 5e3);
   const actions = /* @__PURE__ */ new Map();
   for (const a of config.actions ?? []) {
     if (!ID_PATTERN.test(a.id)) throw new InvalidArgumentError(`action id '${a.id}' must match ${ID_PATTERN}`);
@@ -1773,7 +1788,8 @@ function createSiActions(config) {
     app: config.app,
     hubUrl,
     fetch: fetchImpl,
-    nowSeconds: Math.floor(now() / 1e3)
+    nowSeconds: Math.floor(now() / 1e3),
+    timeoutMs: verifyTimeoutMs
   });
   function contextFrom(service, request, callback) {
     const claims = service.claims;

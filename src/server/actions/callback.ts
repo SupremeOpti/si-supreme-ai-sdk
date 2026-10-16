@@ -8,8 +8,12 @@ type CallbackResult =
   | { jobId?: string; status: 'failed'; error: SiActionJobError };
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+const HUB_DOMAIN = 'supremegroup.ai';
 
-/** https only, except plain http to a loopback host for local development. */
+/**
+ * The callback carries the hub's bearer token, so it may only go to an SI host: https on
+ * supremegroup.ai or a subdomain, or http/https on a loopback host for local development.
+ */
 export function checkCallbackUrl(url: string): string {
   let u: InstanceType<typeof URL>;
   try {
@@ -17,9 +21,11 @@ export function checkCallbackUrl(url: string): string {
   } catch {
     throw new InvalidArgumentError('callback url must be an absolute URL');
   }
-  const local = LOCAL_HOSTS.has(u.hostname) || u.hostname.endsWith('.localhost');
-  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) {
-    throw new InvalidArgumentError('callback url must use https (http is allowed for localhost only)');
+  const host = u.hostname.toLowerCase();
+  const local = LOCAL_HOSTS.has(host) || host.endsWith('.localhost');
+  const hub = host === HUB_DOMAIN || host.endsWith(`.${HUB_DOMAIN}`);
+  if (local ? u.protocol !== 'https:' && u.protocol !== 'http:' : !(hub && u.protocol === 'https:')) {
+    throw new InvalidArgumentError(`callback url must be https on ${HUB_DOMAIN} (or a localhost URL for local development)`);
   }
   return u.toString();
 }
@@ -69,8 +75,13 @@ export async function completeCallback(
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${callback.token}` },
         body: payload,
+        // Never follow a redirect: it could carry the bearer token to another host.
+        redirect: 'manual',
         signal: controller.signal,
       });
+      if (res.status >= 300 && res.status < 400) {
+        return { delivered: false, accepted: false, status: res.status, code: 'redirect_refused' };
+      }
       let parsed: unknown = null;
       try {
         parsed = JSON.parse((await res.text()) || 'null');

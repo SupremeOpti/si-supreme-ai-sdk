@@ -10,6 +10,7 @@ interface FetchInit {
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    redirect?: 'follow' | 'manual' | 'error';
     signal?: any;
 }
 interface FetchResponse {
@@ -815,7 +816,8 @@ interface SiActionsConfig {
     baseUrl: string;
     /** SI hub origin that verifies service tokens, e.g. `https://app.supremegroup.ai`. */
     hubUrl: string;
-    actions: SiActionDefinition<any, any>[];
+    /** Handlers are methods, so a definition typed with its own input/output shapes still fits here. */
+    actions: SiActionDefinition[];
     /** Default `supreme-intelligence`. */
     issuer?: string;
     /** Default `si-actions`. */
@@ -823,6 +825,8 @@ interface SiActionsConfig {
     fetch?: FetchLike;
     logger?: Logger;
     now?: () => number;
+    /** Timeout for each hub token verification call. Default 5000 ms; on expiry the action answers `upstream_unavailable`. */
+    verifyTimeoutMs?: number;
 }
 /** Minimal request shape: the runtime's real `Request` fits. */
 interface SiActionRequest {

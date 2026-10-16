@@ -159,7 +159,7 @@ describe('createSiActions', () => {
   });
 });
 
-const HUB_CB = 'https://hub.example.com/api/workflows/callbacks/55/n_export';
+const HUB_CB = 'https://app.supremegroup.ai/api/workflows/callbacks/55/n_export';
 
 const exportAction: SiActionDefinition = {
   id: 'export_report',
@@ -326,13 +326,35 @@ describe('completeJob', () => {
     expect(fetch.calls).toHaveLength(1);
   });
 
-  it('allows http only for localhost callback URLs', async () => {
-    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }], [exportAction]);
+  it('sends callbacks only to supremegroup.ai over https, or to localhost', async () => {
+    const { si, fetch } = setup([{ status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }, { status: 200, body: { ok: true, accepted: true } }], [exportAction]);
     const ok = { status: 'completed' as const, output: { url: 'u' } };
-    await expect(si.completeJob('export_report', { url: 'http://hub.example.com/cb', token: 't' }, ok)).rejects.toThrow('https');
+    for (const url of ['http://app.supremegroup.ai/cb', 'https://hub.example.com/cb', 'https://supremegroup.ai.evil.com/cb', 'https://evilsupremegroup.ai/cb', 'https://10.0.0.5/cb']) {
+      await expect(si.completeJob('export_report', { url, token: 't' }, ok)).rejects.toThrow('supremegroup.ai');
+    }
+    expect((await si.completeJob('export_report', { url: 'https://v2.supremegroup.ai/api/workflows/callbacks/1/n', token: 't' }, ok)).delivered).toBe(true);
     await expect(si.completeJob('export_report', { url: HUB_CB, token: '' }, ok)).rejects.toThrow('token');
     expect((await si.completeJob('export_report', { url: 'http://localhost:8000/api/workflows/callbacks/1/n', token: 't' }, ok)).delivered).toBe(true);
     expect((await si.completeJob('export_report', { url: 'http://127.0.0.1:8000/cb', token: 't' }, ok)).delivered).toBe(true);
-    expect(fetch.calls).toHaveLength(2);
+    expect(fetch.calls).toHaveLength(3);
+  });
+
+  it('refuses to follow a redirect with the bearer token', async () => {
+    const { si, fetch } = setup([{ status: 302, raw: '', headers: { Location: 'https://evil.example.net/' } }], [exportAction]);
+    const r = await si.completeJob('export_report', cb, { status: 'completed', output: { url: 'u' } });
+    expect(r).toEqual({ delivered: false, accepted: false, status: 302, code: 'redirect_refused' });
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].init.redirect).toBe('manual');
+  });
+});
+
+describe('createSiActions token verification', () => {
+  it('times out a hung hub verifier and answers upstream_unavailable', async () => {
+    const fetch = fakeFetch('hang');
+    const si = createSiActions({ app: 'data-library', baseUrl: 'https://library.example.com', hubUrl: 'https://hub.example.com', actions: [search], fetch, logger: silentLogger(), now: () => NOW, verifyTimeoutMs: 20 });
+    const res = await si.handle(req('POST', '/si/actions/search_library', { auth: token(goodClaims()), body: { input: { query: 'x' } } }));
+    expect(res.status).toBe(503);
+    expect(parse(res).error.code).toBe('upstream_unavailable');
+    expect(fetch.calls[0].init.redirect).toBe('manual');
   });
 });

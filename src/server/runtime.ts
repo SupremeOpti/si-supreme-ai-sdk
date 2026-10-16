@@ -12,6 +12,7 @@ export interface FetchInit {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  redirect?: 'follow' | 'manual' | 'error';
   // `any` so the runtime's real `fetch` (whose init takes an AbortSignal) is assignable.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   signal?: any;

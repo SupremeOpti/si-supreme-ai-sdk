@@ -105,6 +105,7 @@ export function createSiActions(config: SiActionsConfig): SiActions {
   const fetchImpl = config.fetch ?? ((input, init) => fetch(input, init));
   const issuer = config.issuer ?? 'supreme-intelligence';
   const audience = config.audience ?? 'si-actions';
+  const verifyTimeoutMs = Math.max(1, config.verifyTimeoutMs ?? 5_000);
 
   const actions = new Map<string, SiActionDefinition>();
   for (const a of config.actions ?? []) {
@@ -137,7 +138,7 @@ export function createSiActions(config: SiActionsConfig): SiActions {
   });
 
   const verify = (request: SiActionRequest) => verifyServiceToken(request.headers.get('authorization'), {
-    issuer, audience, app: config.app, hubUrl, fetch: fetchImpl, nowSeconds: Math.floor(now() / 1000),
+    issuer, audience, app: config.app, hubUrl, fetch: fetchImpl, nowSeconds: Math.floor(now() / 1000), timeoutMs: verifyTimeoutMs,
   });
 
   function contextFrom(service: Awaited<ReturnType<typeof verify>>, request: SiActionRequest, callback: SiActionCallback | null): SiActionContext {

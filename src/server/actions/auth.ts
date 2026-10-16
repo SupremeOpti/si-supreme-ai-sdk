@@ -15,6 +15,7 @@ interface AuthOptions {
   hubUrl: string;
   fetch: FetchLike;
   nowSeconds: number;
+  timeoutMs: number;
 }
 
 /** `aud` may be a string or a list; the hub sends `["si-actions", "si-actions:<app>"]`. */
@@ -63,16 +64,22 @@ export async function verifyServiceToken(authorization: string | null, opts: Aut
 
   let status: number;
   let body: unknown;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
   try {
     const res = await opts.fetch(`${opts.hubUrl}/api/verify-session-jwt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ token }),
+      redirect: 'manual',
+      signal: controller.signal,
     });
     status = res.status;
     body = JSON.parse((await res.text()) || 'null');
   } catch {
     throw new SiActionError('upstream_unavailable', 'Could not reach the SI hub to verify the token.');
+  } finally {
+    clearTimeout(timer);
   }
 
   if (status === 400 || status === 401) throw new SiActionError('unauthenticated', 'The SI hub rejected the token.');
