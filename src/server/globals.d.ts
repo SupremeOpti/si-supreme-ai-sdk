@@ -25,6 +25,7 @@ declare var URL: {
     readonly origin: string;
     readonly pathname: string;
     readonly search: string;
+    readonly searchParams: { get(name: string): string | null };
     toString(): string;
   };
 };
@@ -36,6 +37,8 @@ declare var crypto: {
     digest(algorithm: 'SHA-256', data: Uint8Array): Promise<ArrayBuffer>;
   };
 };
+
+declare function atob(data: string): string;
 
 declare function setTimeout(handler: () => void, timeout?: number): unknown;
 declare function clearTimeout(id: unknown): void;

@@ -1,4 +1,5 @@
-import React, { ReactNode } from 'react';
+import * as react_jsx_runtime from 'react/jsx-runtime';
+import { ReactNode } from 'react';
 
 /**
  * Supreme AI Credit SDK - Type Definitions
@@ -920,15 +921,11 @@ declare class SkillsClient {
 
 declare function useCreditSystem(config?: CreditSDKConfig): UseCreditSystemReturn;
 
-/**
- * React Context Provider for Supreme AI Credit System SDK
- */
-
 interface CreditSystemProviderProps {
     children: ReactNode;
     config?: CreditSDKConfig;
 }
-declare function CreditSystemProvider({ children, config }: CreditSystemProviderProps): React.JSX.Element;
+declare function CreditSystemProvider({ children, config }: CreditSystemProviderProps): react_jsx_runtime.JSX.Element;
 declare function useCreditContext(): UseCreditSystemReturn;
 
 /**

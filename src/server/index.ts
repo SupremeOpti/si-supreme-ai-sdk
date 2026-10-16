@@ -89,3 +89,23 @@ export type {
   GrantStatus,
   AuthConfig,
 } from './types';
+
+export { createSiActions, acceptSiAction, SiActionError, audienceList, validateJsonSchema, SI_ACTIONS_VERSION, SI_ACTIONS_MANIFEST_PATH } from './actions';
+export type {
+  SiActions,
+  SiActionsConfig,
+  SiActionDefinition,
+  SiActionContext,
+  SiActionAnnotations,
+  SiActionRequest,
+  SiActionResponse,
+  SiActionErrorCode,
+  SiActionCallback,
+  SiActionAcceptOptions,
+  SiActionAccepted,
+  SiActionJobStatus,
+  SiActionJobError,
+  SiCallbackOptions,
+  SiCallbackResult,
+  JsonSchema,
+} from './actions';
