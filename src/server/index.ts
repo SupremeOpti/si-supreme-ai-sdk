@@ -41,6 +41,9 @@ export {
 } from './auth';
 export type { AuthApi, AuthChallenge, ChallengeOptions, IntrospectOptions, ProtectedResourceMetadata } from './auth';
 
+export { scopeManifest, SCOPE_MANIFEST_PATH, SCOPE_MANIFEST_VERSION, MAX_DECLARED_SCOPES, MAX_SCOPE_MANIFEST_BYTES } from './scopes';
+export type { ScopeKind, ScopeDeclaration, ScopeManifest, ScopeManifestResponse, ScopeManifestInput } from './scopes';
+
 export { memoryCache, memoryLockStore } from './adapters/memory';
 export type { MemoryAdapterOptions } from './adapters/memory';
 export { supabaseLockStore, SUPABASE_LOCK_STORE_SQL } from './adapters/supabase';

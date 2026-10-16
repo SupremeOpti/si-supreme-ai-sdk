@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.5.0 — 2026-10-16
+
+Scope declaration and the SI scope manifest for `@supreme-ai/si-sdk/server`
+(SI-419, for SI-417). Additive: no existing signature or behaviour changes.
+Not a security fix. The browser entry is unchanged (`dist/index.*`
+byte-identical).
+
+### New: `auth.scopes`
+
+- `auth: { resource, resourceSlug, scopes: [{ name, label, description?, kind }] }`
+  declares the app's MCP scopes once. Validated against the SI-419 scope
+  manifest contract (v1) at construction, `InvalidArgumentError` naming the
+  rule: names `mcp:<resourceSlug>:<verb>` and unique; `label` single-line
+  plain text of 1–80 characters; `description` optional, at most 500;
+  `kind` `required | default | optional`, at least one `required`; 1–50
+  scopes; serialized manifest at most 64 KB; no `status` (SI owns it).
+  Text is trimmed; unknown fields are dropped. `auth.resource` and
+  `auth.resourceSlug` are required with `scopes`.
+- One list, served twice. `protectedResourceMetadata()` takes
+  `scopes_supported` from the declaration (`auth.scopesSupported` alone
+  still works; with `scopes` it must be a subset and narrows the PRM, for
+  staging a scope that awaits SI approval). `si.auth.scopeManifest()`
+  returns `{ version: 1, resource, scopes }` and
+  `si.auth.scopeManifestResponse()` a `200` with the JSON text,
+  `Content-Type: application/json` and `Cache-Control: public, max-age=300`
+  for `GET /.well-known/si-mcp-scopes.json` (`SCOPE_MANIFEST_PATH`).
+  Runtime-neutral, as the PRM helper.
+- `si.auth.requireScope` throws `InvalidArgumentError` for a name outside
+  the declaration (a typo is never a 403 step-up for a scope SI doesn't
+  know). The standalone `requireScope` export is unchanged.
+- New exports: `scopeManifest(input)` (the same validation, for build-time
+  checks), `SCOPE_MANIFEST_PATH`, `SCOPE_MANIFEST_VERSION`,
+  `MAX_DECLARED_SCOPES`, `MAX_SCOPE_MANIFEST_BYTES`; types `ScopeKind`,
+  `ScopeDeclaration`, `ScopeManifest`, `ScopeManifestResponse`,
+  `ScopeManifestInput`.
+- SI approves manifest changes before users see them: a new scope, or a
+  change to a scope's `label`, `description` or `kind`, lands in SI's
+  registry as `pending` until a superadmin approves it; a removed scope
+  becomes `deprecated` on approval, never deleted.
+
+Internal: `canonicalResourceUri` moved to `src/server/resource.ts`
+(re-exported unchanged). Docs: `docs/SERVER.md` (Declaring scopes), README,
+`SKILL.md`.
+
 ## 1.4.0 — 2026-10-16
 
 SI Workflow Builder actions for `@supreme-ai/si-sdk/server`: `createSiActions`

@@ -51,6 +51,56 @@ interface LockStoreAdapter {
     delete(key: string): Promise<void>;
 }
 
+/**
+ * `required`: always granted. `default`: granted when the client asks for no
+ * scope (pre-ticked on the consent screen). `optional`: only when asked for.
+ */
+type ScopeKind = 'required' | 'default' | 'optional';
+/** One scope of the app's MCP resource, as declared in `auth.scopes` and served in the manifest. */
+interface ScopeDeclaration {
+    /** `mcp:<slug>:<verb>` with the SI resource slug (`auth.resourceSlug`), e.g. `mcp:canva:runs`. Unique. */
+    name: string;
+    /** Consent-screen label: single-line plain text, 1 to 80 characters. */
+    label: string;
+    /** Consent-screen detail: single-line plain text, at most 500 characters. */
+    description?: string;
+    kind: ScopeKind;
+}
+/** The SI scope manifest (contract v1), the body of `GET /.well-known/si-mcp-scopes.json`. */
+interface ScopeManifest {
+    version: 1;
+    /** The app's canonical resource URI; must equal SI's `mcp_resources.resource_uri`. */
+    resource: string;
+    scopes: ScopeDeclaration[];
+}
+/** A ready-to-send answer for `GET /.well-known/si-mcp-scopes.json`. Runtime-neutral: build your own `Response` from it. */
+interface ScopeManifestResponse {
+    status: 200;
+    /** `Content-Type: application/json` and `Cache-Control: public, max-age=300`. */
+    headers: Record<string, string>;
+    /** The manifest as JSON text (at most 64 KB). */
+    body: string;
+}
+/** What `scopeManifest()` needs: the same three fields as `auth`. */
+interface ScopeManifestInput {
+    resource?: string;
+    resourceSlug?: string;
+    scopes?: readonly ScopeDeclaration[];
+}
+declare const SCOPE_MANIFEST_PATH = "/.well-known/si-mcp-scopes.json";
+declare const SCOPE_MANIFEST_VERSION = 1;
+/** Contract v1: 1 to 50 scopes per manifest. */
+declare const MAX_DECLARED_SCOPES = 50;
+/** Contract v1: the serialized manifest is at most 64 KB. */
+declare const MAX_SCOPE_MANIFEST_BYTES: number;
+/**
+ * Validate a scope declaration against the SI-419 contract (v1) and return
+ * the manifest. Throws `InvalidArgumentError` naming the first rule broken.
+ * `createSiServerClient` runs this at construction when `auth.scopes` is set;
+ * call it yourself for a build-time check.
+ */
+declare function scopeManifest(input: ScopeManifestInput): ScopeManifest;
+
 interface Logger {
     warn(message: string, context?: Record<string, unknown>): void;
     error?(message: string, context?: Record<string, unknown>): void;
@@ -137,7 +187,24 @@ interface AuthConfig {
     introspectionTtlSeconds?: number;
     /** Cache TTL for `active` grant statuses. Default 0 (off), max 60 s. */
     grantStatusTtlSeconds?: number;
-    /** `scopes_supported` in the PRM. */
+    /**
+     * The SI resource slug (`mcp_resources` slug, e.g. `canva`). Required with
+     * `scopes`: every declared name must be `mcp:<resourceSlug>:<verb>`.
+     */
+    resourceSlug?: string;
+    /**
+     * The app's MCP scopes, declared once (SI-419). Validated against the SI
+     * manifest contract at construction (`InvalidArgumentError`). Serves the
+     * PRM's `scopes_supported` and the manifest at `/.well-known/si-mcp-scopes.json`
+     * (`si.auth.scopeManifest()`, `scopeManifestResponse()`), and makes
+     * `si.auth.requireScope` reject undeclared names. Needs `resource`.
+     */
+    scopes?: ScopeDeclaration[];
+    /**
+     * `scopes_supported` in the PRM. Default: the names in `scopes`. With
+     * `scopes` declared it must be a subset of them (narrows what the PRM
+     * advertises, e.g. while a new scope is pending SI approval).
+     */
     scopesSupported?: string[];
     /** `resource_name` in the PRM. */
     resourceName?: string;
@@ -220,7 +287,7 @@ interface SiServerConfig {
     now?: () => number;
 }
 
-declare const SERVER_SDK_VERSION = "1.4.0";
+declare const SERVER_SDK_VERSION = "1.5.0";
 
 declare const AUDIT_EVENTS_PATH = "/api/membership/audit-events";
 interface AuditApi {
@@ -254,6 +321,13 @@ declare const DEFAULT_SI_HEADER = "x-si-conversation";
 declare function conversationKey(source: ConversationKeySource | null | undefined, options?: ConversationKeyOptions): string | null;
 /** SHA-256 hex of a conversation key. Only the hash is stored or forwarded. */
 declare function hashConversationKey(key: string): Promise<string>;
+
+/**
+ * Canonical form of a resource URI, as SI compares them: lowercase scheme
+ * and host, no default port, one trailing `/` stripped, query kept, no
+ * fragment. Must be https (http only for localhost).
+ */
+declare function canonicalResourceUri(uri: string): string;
 
 declare const INTROSPECT_PATH = "/api/oauth/introspect";
 declare const GRANT_STATUS_PATH = "/api/oauth/grants/status";
@@ -303,10 +377,18 @@ interface AuthApi {
     introspect(bearer: string | null | undefined, options?: IntrospectOptions): Promise<IntrospectionPrincipal>;
     /** Live grant states, chunked by 100. Throws on any failed chunk (no partial answers). */
     grantStatus(grantIds: readonly string[]): Promise<Record<string, GrantStatus>>;
-    /** Throws `InsufficientScopeError` unless the principal has every scope. */
+    /**
+     * Throws `InsufficientScopeError` unless the principal has every scope.
+     * With `auth.scopes` declared, a name outside the declaration is an
+     * `InvalidArgumentError` (a programming error, never a 403 step-up).
+     */
     requireScope(principal: Pick<IntrospectionPrincipal, 'scope'>, scope: string | readonly string[]): void;
-    /** JSON for `/.well-known/oauth-protected-resource` (root and path-suffixed). */
+    /** JSON for `/.well-known/oauth-protected-resource` (root and path-suffixed). `scopes_supported` comes from `auth.scopes` unless `auth.scopesSupported` narrows it. */
     protectedResourceMetadata(requestUrl?: string): ProtectedResourceMetadata;
+    /** The SI scope manifest (contract v1) from `auth.scopes`: `{ version: 1, resource, scopes }`. Throws `InvalidArgumentError` without a declaration. */
+    scopeManifest(): ScopeManifest;
+    /** A ready-to-send `200` for `GET /.well-known/si-mcp-scopes.json`: the manifest as JSON text plus `Content-Type` and `Cache-Control: public, max-age=300`. */
+    scopeManifestResponse(): ScopeManifestResponse;
     /** The path-suffixed PRM URL for the 401 `resource_metadata` parameter. */
     resourceMetadataUrl(requestUrl?: string): string;
     /** Map an error from `introspect` / `requireScope` to a 401 / 403 / 503 answer with `WWW-Authenticate`. */
@@ -316,12 +398,6 @@ interface AuthApi {
 }
 /** True for a principal returned by `si.auth.introspect` (not a copy or a look-alike). */
 declare function isVerifiedPrincipal(value: unknown): value is IntrospectionPrincipal;
-/**
- * Canonical form of a resource URI, as SI compares them: lowercase scheme
- * and host, no default port, one trailing `/` stripped, query kept, no
- * fragment. Must be https (http only for localhost).
- */
-declare function canonicalResourceUri(uri: string): string;
 /**
  * `WWW-Authenticate` value for a Bearer challenge (RFC 6750 §3, RFC 9728 §5.1),
  * e.g. `Bearer error="insufficient_scope", scope="a b", resource_metadata="https://…"`.
@@ -902,4 +978,4 @@ declare function acceptSiAction(options?: SiActionAcceptOptions): SiActionAccept
  */
 declare function createSiActions(config: SiActionsConfig): SiActions;
 
-export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type JsonSchema, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SERVER_SDK_VERSION, SI_ACTIONS_MANIFEST_PATH, SI_ACTIONS_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiActionAcceptOptions, type SiActionAccepted, type SiActionAnnotations, type SiActionCallback, type SiActionContext, type SiActionDefinition, SiActionError, type SiActionErrorCode, type SiActionJobError, type SiActionJobStatus, type SiActionRequest, type SiActionResponse, type SiActions, type SiActionsConfig, type SiCallbackOptions, type SiCallbackResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, acceptSiAction, annotations, audienceList, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiActions, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, supabaseLockStore, validate as validateJsonSchema };
+export { AUDIT_EVENTS_PATH, type AppGrant, AppInactiveError, type AuditApi, type AuditEvent, type AuditForwardingConfig, type AuthApi, type AuthChallenge, type AuthConfig, type BindOrgInput, type BindOrgResult, type CacheAdapter, type ChallengeOptions, type ConversationKeyOptions, type ConversationKeySource, DEFAULT_CODEX_HEADERS, DEFAULT_DETECTION_WINDOW_SECONDS, DEFAULT_LOCK_TTL_SECONDS, DEFAULT_SI_HEADER, type DetectionApi, type DetectionOrg, type FetchInit, type FetchLike, type FetchResponse, GRANT_STATUS_CHUNK_SIZE, GRANT_STATUS_PATH, type GrantStatus, type HeadersInput, type HeadersLike, INTROSPECT_PATH, InsufficientScopeError, type IntrospectOptions, type IntrospectionPrincipal, InvalidArgumentError, InvalidTokenError, type InvalidTokenReason, type JsonSchema, type ListOrganizationsTool, type LockStoreAdapter, LockStoreUnavailableError, type LockedOrganization, type LocksApi, type Logger, MAX_ALLOW_TTL_SECONDS, MAX_DECLARED_SCOPES, MAX_DENY_TTL_SECONDS, MAX_GRANT_STATUS_TTL_SECONDS, MAX_INTROSPECTION_TTL_SECONDS, MAX_SCOPE_MANIFEST_BYTES, type McpApi, type McpContentBlock, type McpToolAnnotations, type McpToolResult, type Membership, type MembershipApi, type MembershipOrganization, type MemoryAdapterOptions, MisconfiguredKeyError, OrgAccessDeniedError, OrgLockedError, type OrganizationsApi, PROTECTED_RESOURCE_METADATA_PATH, type ProtectedResourceMetadata, type ResolvedOrganization, SCOPE_MANIFEST_PATH, SCOPE_MANIFEST_VERSION, SERVER_SDK_VERSION, SI_ACTIONS_MANIFEST_PATH, SI_ACTIONS_VERSION, SUPABASE_LOCK_STORE_SQL, type ScopeDeclaration, type ScopeKind, type ScopeManifest, type ScopeManifestInput, type ScopeManifestResponse, type ScopeMode, type ScopeToolCallInput, type SetIfAbsentResult, type SiActionAcceptOptions, type SiActionAccepted, type SiActionAnnotations, type SiActionCallback, type SiActionContext, type SiActionDefinition, SiActionError, type SiActionErrorCode, type SiActionJobError, type SiActionJobStatus, type SiActionRequest, type SiActionResponse, type SiActions, type SiActionsConfig, type SiCallbackOptions, type SiCallbackResult, type SiServerClient, type SiServerConfig, SiServerError, type SiServerErrorCode, SiUnavailableError, type SiUnavailableReason, SiValidationError, type SupabaseLockStoreOptions, type SupabaseRpcClient, type ToolKind, type ToolScope, UserGoneError, acceptSiAction, annotations, audienceList, bearerChallenge, bearerToken, canonicalResourceUri, conversationKey, createSiActions, createSiServerClient, errorResult, hashConversationKey, isSiServerError, isVerifiedPrincipal, labelResult, memoryCache, memoryLockStore, orgBanner, requireScope, scopeManifest, supabaseLockStore, validate as validateJsonSchema };

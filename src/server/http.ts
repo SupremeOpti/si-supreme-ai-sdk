@@ -2,7 +2,7 @@ import type { FetchLike, FetchResponse, HeadersLike } from './runtime';
 import { SiUnavailableError } from './errors';
 import type { Logger } from './types';
 
-export const SERVER_SDK_VERSION = '1.4.0';
+export const SERVER_SDK_VERSION = '1.5.0';
 
 export interface HttpOptions {
   baseUrl: string;
