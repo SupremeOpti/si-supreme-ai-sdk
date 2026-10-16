@@ -1832,7 +1832,7 @@ function createSiActions(config) {
       throw new SiActionError("unknown_action", "Not an SI Actions route.");
     } catch (e) {
       if (e instanceof SiActionError) return errorResponse(e);
-      logger.error?.("[si-sdk/actions] action threw", { error: e instanceof Error ? e.message : String(e) });
+      logger.error?.("[si-sdk/actions] action threw", { error: e instanceof Error ? e.name : typeof e });
       return errorResponse(new SiActionError("internal_error", "The action failed."));
     }
   }

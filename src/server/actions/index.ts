@@ -275,7 +275,8 @@ export function createSiActions(config: SiActionsConfig): SiActions {
       throw new SiActionError('unknown_action', 'Not an SI Actions route.');
     } catch (e) {
       if (e instanceof SiActionError) return errorResponse(e);
-      logger.error?.('[si-sdk/actions] action threw', { error: e instanceof Error ? e.message : String(e) });
+      // Only the error class: handler messages can carry patient or HCP data.
+      logger.error?.('[si-sdk/actions] action threw', { error: e instanceof Error ? e.name : typeof e });
       return errorResponse(new SiActionError('internal_error', 'The action failed.'));
     }
   }
