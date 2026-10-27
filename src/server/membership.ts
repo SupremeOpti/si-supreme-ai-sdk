@@ -28,6 +28,8 @@ export interface MembershipDeps {
   cache: CacheAdapter;
   logger: Logger;
   now: () => number;
+  /** SI's base URL; `logoUrl` must be on its origin. */
+  baseUrl: string;
   allowTtlSeconds: number;
   denyTtlSeconds: number;
 }
@@ -56,10 +58,27 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 const isStr = (v: unknown): v is string => typeof v === 'string';
 
 /**
- * Validate SI's `organizations` array (`{id, slug, name, roles, app_grant}`
- * items), shared by membership and introspection. Anything unexpected → null.
+ * `logo_url` only when it's an absolute URL on SI's own origin, so consumers
+ * can put it straight into `<img src>`. Anything else (missing on SI before
+ * SI-429, relative, another host or scheme) → null: it's cosmetic, so it
+ * never fails the answer.
  */
-export function parseOrganizations(value: unknown): MembershipOrganization[] | null {
+export function siLogoUrl(value: unknown, siOrigin: string): string | null {
+  // The prefix check pins scheme, host and port and rules out `user@` credentials.
+  if (!isStr(value) || !value.startsWith(`${siOrigin}/`) || /\s/.test(value)) return null;
+  try {
+    return new URL(value).origin === siOrigin ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate SI's `organizations` array (`{id, slug, name, logo_url, roles,
+ * app_grant}` items), shared by membership and introspection. Anything
+ * unexpected → null, except `logo_url` (see `siLogoUrl`).
+ */
+export function parseOrganizations(value: unknown, siOrigin: string): MembershipOrganization[] | null {
   if (!Array.isArray(value)) return null;
   const organizations: MembershipOrganization[] = [];
   for (const raw of value) {
@@ -67,13 +86,14 @@ export function parseOrganizations(value: unknown): MembershipOrganization[] | n
     const o = raw as Record<string, unknown>;
     if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
     if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+    const logoUrl = siLogoUrl(o.logo_url, siOrigin);
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, logoUrl, roles: [...o.roles], appGrant: o.app_grant });
   }
   return organizations;
 }
 
 /** Validate SI's 200 body. Anything unexpected → null (caller fails closed). */
-export function parseMembershipBody(body: unknown): Omit<Membership, 'fromCache'> | null {
+export function parseMembershipBody(body: unknown, siOrigin: string): Omit<Membership, 'fromCache'> | null {
   if (!body || typeof body !== 'object') return null;
   const data = (body as { data?: unknown }).data;
   if (!data || typeof data !== 'object') return null;
@@ -83,7 +103,7 @@ export function parseMembershipBody(body: unknown): Omit<Membership, 'fromCache'
   if (!user || !isInt(user.id)) return null;
   if (!app || !isInt(app.id) || !isStr(app.name)) return null;
   if (typeof d.is_superadmin !== 'boolean') return null;
-  const organizations = parseOrganizations(d.organizations);
+  const organizations = parseOrganizations(d.organizations, siOrigin);
   if (!organizations) return null;
 
   const meta = (body as { meta?: Record<string, unknown> }).meta;
@@ -117,6 +137,7 @@ function isCacheEntry(v: unknown): v is CacheEntry {
 
 export function createMembership(deps: MembershipDeps): MembershipApi {
   const inflight = new Map<string, Promise<CacheEntry>>();
+  const siOrigin = new URL(deps.baseUrl).origin;
   const cacheKey = (id: string) => `si:m:${id}`;
 
   const readCache = async (id: string): Promise<CacheEntry | undefined> => {
@@ -148,7 +169,7 @@ export function createMembership(deps: MembershipDeps): MembershipApi {
 
     switch (result.status) {
       case 200: {
-        const data = parseMembershipBody(result.body);
+        const data = parseMembershipBody(result.body, siOrigin);
         if (!data) throw new SiUnavailableError('malformed_response', 'membership body did not match the contract', 200);
         if (String(data.user.id) !== id) {
           throw new SiUnavailableError('malformed_response', 'membership answer is for another user', 200);
@@ -189,7 +210,9 @@ export function createMembership(deps: MembershipDeps): MembershipApi {
 
   const toMembership = (id: string, entry: CacheEntry, fromCache: boolean): Membership => {
     if (entry.kind === 'user_not_found') throw new UserGoneError(id);
-    return { ...entry.data, organizations: entry.data.organizations.map((o) => ({ ...o, roles: [...o.roles] })), fromCache };
+    // Rechecked: the cache may be shared, and answers cached before 1.6.0 have no logoUrl.
+    const organizations = entry.data.organizations.map((o) => ({ ...o, logoUrl: siLogoUrl(o.logoUrl, siOrigin), roles: [...o.roles] }));
+    return { ...entry.data, organizations, fromCache };
   };
 
   const get = async (userId: number | string): Promise<Membership> => {

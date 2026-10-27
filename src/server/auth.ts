@@ -159,7 +159,7 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 type ActiveBody = Omit<IntrospectionPrincipal, 'fromCache'>;
 
 /** Validate SI's `active: true` body. Anything unexpected → null (caller fails closed). */
-export function parseActiveIntrospection(body: unknown): ActiveBody | null {
+export function parseActiveIntrospection(body: unknown, siOrigin: string): ActiveBody | null {
   if (!body || typeof body !== 'object') return null;
   const b = body as Record<string, unknown>;
   if (b.active !== true) return null;
@@ -170,7 +170,7 @@ export function parseActiveIntrospection(body: unknown): ActiveBody | null {
   if (!isInt(b.exp) || !isInt(b.iat) || typeof b.is_superadmin !== 'boolean') return null;
   if (b.email !== undefined && b.email !== null && !isStr(b.email)) return null;
   if (b.name !== undefined && b.name !== null && !isStr(b.name)) return null;
-  const organizations = parseOrganizations(b.organizations);
+  const organizations = parseOrganizations(b.organizations, siOrigin);
   if (!organizations) return null;
 
   const principal: { -readonly [K in keyof ActiveBody]: ActiveBody[K] } = {
@@ -226,6 +226,7 @@ export function createAuth(deps: AuthDeps): AuthApi {
   const grantTtl = cfg.grantStatusTtlSeconds === undefined ? 0 : clampTtl(cfg.grantStatusTtlSeconds, MAX_GRANT_STATUS_TTL_SECONDS);
   const defaultResource = cfg.resource === undefined ? undefined : canonicalResourceUri(cfg.resource);
   const issuer = cfg.issuer ?? deps.baseUrl;
+  const siOrigin = new URL(deps.baseUrl).origin;
   // SI-419: validated once, at construction; served many times.
   const declaration = cfg.scopes === undefined ? undefined : buildScopeManifest(cfg);
   const declaredNames = declaration === undefined ? undefined : new Set(declaration.scopes.map((s) => s.name));
@@ -306,7 +307,7 @@ export function createAuth(deps: AuthDeps): AuthApi {
       if (!v || typeof v !== 'object' || v.v !== 1 || typeof v.at !== 'number' || typeof v.ttlMs !== 'number') return null;
       const age = deps.now() - v.at;
       if (age < 0 || age >= Math.min(v.ttlMs, introspectionTtl * 1000)) return null;
-      return parseActiveIntrospection(v.body);
+      return parseActiveIntrospection(v.body, siOrigin);
     } catch {
       return null;
     }
@@ -323,7 +324,7 @@ export function createAuth(deps: AuthDeps): AuthApi {
     if (result.status !== 200) return fail(result);
     const body = result.body as { active?: unknown } | undefined;
     if (body && typeof body === 'object' && body.active === false) throw new InvalidTokenError('inactive');
-    const data = parseActiveIntrospection(body);
+    const data = parseActiveIntrospection(body, siOrigin);
     if (!data) throw new SiUnavailableError('malformed_response', 'introspection body did not match the contract', 200);
 
     // ≤ 60 s and never past exp. Whole seconds, rounded down.

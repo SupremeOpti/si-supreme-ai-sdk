@@ -387,7 +387,7 @@ function isSiServerError(err) {
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.5.0";
+var SERVER_SDK_VERSION = "1.6.0";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
@@ -505,7 +505,15 @@ function normalizeUserId(userId) {
 }
 var isInt = (v) => typeof v === "number" && Number.isInteger(v);
 var isStr = (v) => typeof v === "string";
-function parseOrganizations(value) {
+function siLogoUrl(value, siOrigin) {
+  if (!isStr(value) || !value.startsWith(`${siOrigin}/`) || /\s/.test(value)) return null;
+  try {
+    return new URL(value).origin === siOrigin ? value : null;
+  } catch {
+    return null;
+  }
+}
+function parseOrganizations(value, siOrigin) {
   if (!Array.isArray(value)) return null;
   const organizations = [];
   for (const raw of value) {
@@ -513,11 +521,12 @@ function parseOrganizations(value) {
     const o = raw;
     if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
     if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+    const logoUrl = siLogoUrl(o.logo_url, siOrigin);
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, logoUrl, roles: [...o.roles], appGrant: o.app_grant });
   }
   return organizations;
 }
-function parseMembershipBody(body2) {
+function parseMembershipBody(body2, siOrigin) {
   if (!body2 || typeof body2 !== "object") return null;
   const data = body2.data;
   if (!data || typeof data !== "object") return null;
@@ -527,7 +536,7 @@ function parseMembershipBody(body2) {
   if (!user || !isInt(user.id)) return null;
   if (!app || !isInt(app.id) || !isStr(app.name)) return null;
   if (typeof d.is_superadmin !== "boolean") return null;
-  const organizations = parseOrganizations(d.organizations);
+  const organizations = parseOrganizations(d.organizations, siOrigin);
   if (!organizations) return null;
   const meta = body2.meta;
   return {
@@ -555,6 +564,7 @@ function isCacheEntry(v) {
 }
 function createMembership(deps) {
   const inflight = /* @__PURE__ */ new Map();
+  const siOrigin = new URL(deps.baseUrl).origin;
   const cacheKey = (id) => `si:m:${id}`;
   const readCache = async (id) => {
     try {
@@ -580,7 +590,7 @@ function createMembership(deps) {
     const code = errorCode(result);
     switch (result.status) {
       case 200: {
-        const data = parseMembershipBody(result.body);
+        const data = parseMembershipBody(result.body, siOrigin);
         if (!data) throw new SiUnavailableError("malformed_response", "membership body did not match the contract", 200);
         if (String(data.user.id) !== id) {
           throw new SiUnavailableError("malformed_response", "membership answer is for another user", 200);
@@ -617,7 +627,8 @@ function createMembership(deps) {
   };
   const toMembership = (id, entry, fromCache) => {
     if (entry.kind === "user_not_found") throw new UserGoneError(id);
-    return { ...entry.data, organizations: entry.data.organizations.map((o) => ({ ...o, roles: [...o.roles] })), fromCache };
+    const organizations = entry.data.organizations.map((o) => ({ ...o, logoUrl: siLogoUrl(o.logoUrl, siOrigin), roles: [...o.roles] }));
+    return { ...entry.data, organizations, fromCache };
   };
   const get = async (userId) => {
     const id = normalizeUserId(userId);
@@ -781,7 +792,7 @@ function requireScope(principal, scope) {
 }
 var isStr2 = (v) => typeof v === "string";
 var isInt2 = (v) => typeof v === "number" && Number.isInteger(v);
-function parseActiveIntrospection(body2) {
+function parseActiveIntrospection(body2, siOrigin) {
   if (!body2 || typeof body2 !== "object") return null;
   const b = body2;
   if (b.active !== true) return null;
@@ -792,7 +803,7 @@ function parseActiveIntrospection(body2) {
   if (!isInt2(b.exp) || !isInt2(b.iat) || typeof b.is_superadmin !== "boolean") return null;
   if (b.email !== void 0 && b.email !== null && !isStr2(b.email)) return null;
   if (b.name !== void 0 && b.name !== null && !isStr2(b.name)) return null;
-  const organizations = parseOrganizations(b.organizations);
+  const organizations = parseOrganizations(b.organizations, siOrigin);
   if (!organizations) return null;
   const principal = {
     sub: b.sub,
@@ -828,6 +839,7 @@ function createAuth(deps) {
   const grantTtl = cfg.grantStatusTtlSeconds === void 0 ? 0 : clampTtl(cfg.grantStatusTtlSeconds, MAX_GRANT_STATUS_TTL_SECONDS);
   const defaultResource = cfg.resource === void 0 ? void 0 : canonicalResourceUri(cfg.resource);
   const issuer = cfg.issuer ?? deps.baseUrl;
+  const siOrigin = new URL(deps.baseUrl).origin;
   const declaration = cfg.scopes === void 0 ? void 0 : scopeManifest(cfg);
   const declaredNames = declaration === void 0 ? void 0 : new Set(declaration.scopes.map((s) => s.name));
   if (declaredNames && cfg.scopesSupported) {
@@ -900,7 +912,7 @@ function createAuth(deps) {
       if (!v || typeof v !== "object" || v.v !== 1 || typeof v.at !== "number" || typeof v.ttlMs !== "number") return null;
       const age = deps.now() - v.at;
       if (age < 0 || age >= Math.min(v.ttlMs, introspectionTtl * 1e3)) return null;
-      return parseActiveIntrospection(v.body);
+      return parseActiveIntrospection(v.body, siOrigin);
     } catch {
       return null;
     }
@@ -916,7 +928,7 @@ function createAuth(deps) {
     if (result.status !== 200) return fail(result);
     const body2 = result.body;
     if (body2 && typeof body2 === "object" && body2.active === false) throw new InvalidTokenError("inactive");
-    const data = parseActiveIntrospection(body2);
+    const data = parseActiveIntrospection(body2, siOrigin);
     if (!data) throw new SiUnavailableError("malformed_response", "introspection body did not match the contract", 200);
     const ttlSeconds = Math.min(introspectionTtl, Math.floor((data.exp * 1e3 - deps.now()) / 1e3));
     if (ttlSeconds > 0) {
@@ -1409,6 +1421,7 @@ function createSiServerClient(config) {
     cache,
     logger,
     now,
+    baseUrl,
     allowTtlSeconds: clampTtl(config.membership?.allowTtlSeconds, MAX_ALLOW_TTL_SECONDS),
     denyTtlSeconds: clampTtl(config.membership?.denyTtlSeconds, MAX_DENY_TTL_SECONDS)
   });

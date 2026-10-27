@@ -41,8 +41,8 @@ describe('membership.get', () => {
       app: { id: 12, name: 'Studio Canvas' },
       isSuperadmin: false,
       organizations: [
-        { id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], appGrant: 'organization' },
-        { id: 29, slug: 'supreme-group', name: 'Supreme Group', roles: ['orgadmin'], appGrant: 'role' },
+        { id: 2, slug: 'kadiko', name: 'Kadiko', logoUrl: 'https://si.example.com/org-icon/kadiko.png', roles: ['client'], appGrant: 'organization' },
+        { id: 29, slug: 'supreme-group', name: 'Supreme Group', logoUrl: null, roles: ['orgadmin'], appGrant: 'role' },
       ],
       generatedAt: '2026-10-02T15:04:05Z',
       fromCache: false,
@@ -203,6 +203,59 @@ describe('cache TTLs', () => {
   });
 });
 
+describe('membership logoUrl', () => {
+  it('is null when SI predates logo_url', async () => {
+    const orgs = [{ id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], app_grant: 'organization' }];
+    const { si } = client([{ status: 200, body: membershipBody(456, orgs) }]);
+    await expect(si.membership.get(456)).resolves.toMatchObject({ organizations: [{ id: 2, logoUrl: null }] });
+  });
+
+  it('is null instead of failing the answer unless it is an absolute URL on the SI origin', async () => {
+    const bad = [
+      42,
+      '',
+      '/org-icon/relative.png',
+      'javascript:alert(1)',
+      'data:image/png;base64,AAAA',
+      'http://si.example.com/org-icon/a.png',
+      'https://evil.example.com/org-icon/a.png',
+      'https://si.example.com.evil.com/a.png',
+      'https://user:pw@si.example.com/a.png',
+    ];
+    const orgs = bad.map((logo_url, i) => ({ id: i + 1, slug: `o${i}`, name: 'O', logo_url, roles: [], app_grant: 'organization' }));
+    const { si } = client([{ status: 200, body: membershipBody(456, orgs) }]);
+    const m = await si.membership.get(456);
+    expect(m.organizations.map((o) => o.logoUrl)).toEqual(bad.map(() => null));
+  });
+
+  it('drops an off-origin logoUrl read back from a shared cache', async () => {
+    const data = {
+      user: { id: 456 },
+      app: { id: 12, name: 'Studio Canvas' },
+      isSuperadmin: false,
+      organizations: [{ id: 2, slug: 'kadiko', name: 'Kadiko', logoUrl: 'https://evil.example.com/a.png', roles: ['client'], appGrant: 'organization' }],
+      generatedAt: '2026-10-02T15:04:05Z',
+    };
+    const cache = { get: async () => ({ v: 1, kind: 'allow', at: Date.now(), data }), set: async () => undefined, delete: async () => undefined };
+    const { si } = client([], { cache, now: () => Date.now() });
+    await expect(si.membership.requireOrg(456, 2)).resolves.toMatchObject({ id: 2, logoUrl: null });
+  });
+
+  it('is null for an answer cached by an SDK before 1.6.0', async () => {
+    const data = {
+      user: { id: 456 },
+      app: { id: 12, name: 'Studio Canvas' },
+      isSuperadmin: false,
+      organizations: [{ id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], appGrant: 'organization' }],
+      generatedAt: '2026-10-02T15:04:05Z',
+    };
+    const cache = { get: async () => ({ v: 1, kind: 'allow', at: Date.now(), data }), set: async () => undefined, delete: async () => undefined };
+    const { si, fetch } = client([], { cache, now: () => Date.now() });
+    await expect(si.organizations.resolve(456, 'kadiko')).resolves.toMatchObject({ id: 2, logoUrl: null });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('requireOrg', () => {
   it('returns roles and app grant when the org is present', async () => {
     const { si } = client([ok()]);
@@ -210,6 +263,7 @@ describe('requireOrg', () => {
       id: 29,
       slug: 'supreme-group',
       name: 'Supreme Group',
+      logoUrl: null,
       roles: ['orgadmin'],
       appGrant: 'role',
     });
