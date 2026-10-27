@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.6.0 — 2026-10-26
+
+Org logos for org pickers (SI-429). Additive: no existing signature or
+behaviour changes. The browser entry is unchanged.
+
+- `MembershipOrganization` gains `logoUrl: string | null`, so
+  `si.membership.get`, `si.membership.requireOrg`,
+  `si.organizations.resolve` and the introspection principal's
+  `organizations` all carry it. It is SI's `logo_url`: the org's icon, else
+  its logo, as a public absolute URL on SI's host (no session needed; allow
+  that host in your `img-src` CSP), or `null` when the org has none.
+- A missing `logo_url` (SI before SI-429) or a malformed one becomes `null`
+  rather than failing the membership answer. Membership answers cached by an
+  older SDK read back with `logoUrl: null` until they expire.
+
 ## 1.5.0 — 2026-10-16
 
 Scope declaration and the SI scope manifest for `@supreme-ai/si-sdk/server`

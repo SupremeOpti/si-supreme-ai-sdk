@@ -387,7 +387,7 @@ function isSiServerError(err) {
 }
 
 // src/server/http.ts
-var SERVER_SDK_VERSION = "1.5.0";
+var SERVER_SDK_VERSION = "1.6.0";
 var defaultSleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
@@ -513,7 +513,8 @@ function parseOrganizations(value) {
     const o = raw;
     if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
     if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+    const logoUrl = isStr(o.logo_url) && o.logo_url !== "" ? o.logo_url : null;
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, logoUrl, roles: [...o.roles], appGrant: o.app_grant });
   }
   return organizations;
 }
@@ -617,7 +618,8 @@ function createMembership(deps) {
   };
   const toMembership = (id, entry, fromCache) => {
     if (entry.kind === "user_not_found") throw new UserGoneError(id);
-    return { ...entry.data, organizations: entry.data.organizations.map((o) => ({ ...o, roles: [...o.roles] })), fromCache };
+    const organizations = entry.data.organizations.map((o) => ({ ...o, logoUrl: o.logoUrl ?? null, roles: [...o.roles] }));
+    return { ...entry.data, organizations, fromCache };
   };
   const get = async (userId) => {
     const id = normalizeUserId(userId);

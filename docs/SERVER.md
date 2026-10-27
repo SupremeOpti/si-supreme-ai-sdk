@@ -337,7 +337,7 @@ interface IntrospectionPrincipal {      // frozen; only introspect creates one
   grantId: string;                      // the connection id; stable across refreshes
   requestedResource: string;            // aud, or the query variant the client used (…/mcp?instance=broth)
   isSuperadmin: boolean;
-  organizations: Array<{ id; slug; name; roles; appGrant }>;   // same shape as membership; may be empty
+  organizations: Array<{ id; slug; name; logoUrl; roles; appGrant }>;   // same shape as membership; may be empty
   exp: number; iat: number;             // Unix seconds
   iss: string;
   email?: string; name?: string;        // only when SI sends them
@@ -631,7 +631,7 @@ interface Membership {
   user: { id: number };
   app: { id: number; name: string };
   isSuperadmin: boolean;
-  organizations: Array<{ id: number; slug: string; name: string; roles: string[]; appGrant: 'organization' | 'role' | 'orgadmin' | 'superadmin' }>;
+  organizations: Array<{ id: number; slug: string; name: string; logoUrl: string | null; roles: string[]; appGrant: 'organization' | 'role' | 'orgadmin' | 'superadmin' }>;
   generatedAt: string;   // SI meta.generated_at
   fromCache: boolean;
 }

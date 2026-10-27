@@ -42,8 +42,8 @@ export function fakeFetch(...replies: Reply[]) {
 }
 
 export const ORGS = [
-  { id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], app_grant: 'organization' },
-  { id: 29, slug: 'supreme-group', name: 'Supreme Group', roles: ['orgadmin'], app_grant: 'role' },
+  { id: 2, slug: 'kadiko', name: 'Kadiko', logo_url: 'https://si.example.com/org-icon/kadiko.png', roles: ['client'], app_grant: 'organization' },
+  { id: 29, slug: 'supreme-group', name: 'Supreme Group', logo_url: null, roles: ['orgadmin'], app_grant: 'role' },
 ];
 
 export function membershipBody(userId = 456, organizations: unknown[] = ORGS) {

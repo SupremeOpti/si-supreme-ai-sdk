@@ -111,6 +111,12 @@ interface MembershipOrganization {
     id: number;
     slug: string;
     name: string;
+    /**
+     * Public URL of the org's picker image (its icon, else its logo) on SI's
+     * host, or `null` when it has none. Loadable without a session; allow SI's
+     * host in your `img-src` CSP. Square-ish PNG/JPG of any size: scale it down.
+     */
+    logoUrl: string | null;
     roles: string[];
     appGrant: AppGrant;
 }
@@ -287,7 +293,7 @@ interface SiServerConfig {
     now?: () => number;
 }
 
-declare const SERVER_SDK_VERSION = "1.5.0";
+declare const SERVER_SDK_VERSION = "1.6.0";
 
 declare const AUDIT_EVENTS_PATH = "/api/membership/audit-events";
 interface AuditApi {

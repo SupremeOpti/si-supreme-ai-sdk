@@ -8,7 +8,7 @@ function si() {
 }
 
 describe('organizations.resolve', () => {
-  const kadiko = { id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], appGrant: 'organization' };
+  const kadiko = { id: 2, slug: 'kadiko', name: 'Kadiko', logoUrl: 'https://si.example.com/org-icon/kadiko.png', roles: ['client'], appGrant: 'organization' };
 
   it('resolves by slug', async () => {
     await expect(si().si.organizations.resolve(456, 'kadiko')).resolves.toEqual(kadiko);

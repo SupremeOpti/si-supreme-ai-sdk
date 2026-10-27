@@ -56,8 +56,10 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 const isStr = (v: unknown): v is string => typeof v === 'string';
 
 /**
- * Validate SI's `organizations` array (`{id, slug, name, roles, app_grant}`
- * items), shared by membership and introspection. Anything unexpected → null.
+ * Validate SI's `organizations` array (`{id, slug, name, logo_url, roles,
+ * app_grant}` items), shared by membership and introspection. Anything
+ * unexpected → null, except `logo_url`: it's cosmetic, so a missing (SI before
+ * SI-429) or malformed value becomes `null` instead of failing the answer.
  */
 export function parseOrganizations(value: unknown): MembershipOrganization[] | null {
   if (!Array.isArray(value)) return null;
@@ -67,7 +69,8 @@ export function parseOrganizations(value: unknown): MembershipOrganization[] | n
     const o = raw as Record<string, unknown>;
     if (!isInt(o.id) || !isStr(o.slug) || !isStr(o.name) || !isStr(o.app_grant)) return null;
     if (!Array.isArray(o.roles) || !o.roles.every(isStr)) return null;
-    organizations.push({ id: o.id, slug: o.slug, name: o.name, roles: [...o.roles], appGrant: o.app_grant });
+    const logoUrl = isStr(o.logo_url) && o.logo_url !== '' ? o.logo_url : null;
+    organizations.push({ id: o.id, slug: o.slug, name: o.name, logoUrl, roles: [...o.roles], appGrant: o.app_grant });
   }
   return organizations;
 }
@@ -189,7 +192,9 @@ export function createMembership(deps: MembershipDeps): MembershipApi {
 
   const toMembership = (id: string, entry: CacheEntry, fromCache: boolean): Membership => {
     if (entry.kind === 'user_not_found') throw new UserGoneError(id);
-    return { ...entry.data, organizations: entry.data.organizations.map((o) => ({ ...o, roles: [...o.roles] })), fromCache };
+    // `?? null`: answers cached by an SDK before 1.6.0 have no logoUrl.
+    const organizations = entry.data.organizations.map((o) => ({ ...o, logoUrl: o.logoUrl ?? null, roles: [...o.roles] }));
+    return { ...entry.data, organizations, fromCache };
   };
 
   const get = async (userId: number | string): Promise<Membership> => {

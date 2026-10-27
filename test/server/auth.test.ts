@@ -108,8 +108,8 @@ describe('auth.introspect', () => {
       requestedResource: `${RESOURCE}?instance=broth`,
       isSuperadmin: false,
       organizations: [
-        { id: 2, slug: 'kadiko', name: 'Kadiko', roles: ['client'], appGrant: 'organization' },
-        { id: 29, slug: 'supreme-group', name: 'Supreme Group', roles: ['orgadmin'], appGrant: 'role' },
+        { id: 2, slug: 'kadiko', name: 'Kadiko', logoUrl: 'https://si.example.com/org-icon/kadiko.png', roles: ['client'], appGrant: 'organization' },
+        { id: 29, slug: 'supreme-group', name: 'Supreme Group', logoUrl: null, roles: ['orgadmin'], appGrant: 'role' },
       ],
       exp: Math.floor(c.now() / 1000) + 3600,
       iat: Math.floor(c.now() / 1000) - 10,
@@ -725,7 +725,7 @@ describe('org resolution from the principal', () => {
   it('rejects a look-alike principal that did not come from introspect', async () => {
     const { si, fetch } = setup(active());
     const principal = await si.auth.introspect(TOKEN);
-    const forged = { ...principal, organizations: [...principal.organizations, { id: 7, slug: 'acme', name: 'Acme', roles: [], appGrant: 'organization' }] };
+    const forged = { ...principal, organizations: [...principal.organizations, { id: 7, slug: 'acme', name: 'Acme', logoUrl: null, roles: [], appGrant: 'organization' }] };
     await expect(si.mcp.scopeToolCall({ ...call, principal: forged, organization: 'acme' })).rejects.toBeInstanceOf(InvalidArgumentError);
     await expect(si.organizations.resolve(forged, 'acme')).rejects.toBeInstanceOf(InvalidArgumentError);
     expect(fetch).toHaveBeenCalledTimes(1);
