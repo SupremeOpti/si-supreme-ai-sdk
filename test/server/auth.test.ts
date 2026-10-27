@@ -120,6 +120,13 @@ describe('auth.introspect', () => {
     });
   });
 
+  it('drops a logo_url that is not on the SI origin without failing the principal', async () => {
+    const orgs = [{ ...ORGS[0], logo_url: 'https://evil.example.com/a.png' }];
+    const { si } = setup(active({ organizations: orgs }));
+    const p = await si.auth.introspect(TOKEN);
+    expect(p.organizations).toEqual([expect.objectContaining({ id: 2, logoUrl: null })]);
+  });
+
   it('accepts a "Bearer " prefixed value', async () => {
     const { si, fetch } = setup(active());
     await si.auth.introspect(`Bearer ${TOKEN}`);

@@ -295,7 +295,7 @@ si.auth.requireScope(principal, 'mcp:canva:base');
 
 `introspect(bearer, { resource? })` returns an `IntrospectionPrincipal` or throws. It returns a principal only when **all** of these hold:
 
-1. SI answered `200` with `active: true` and a body matching the contract (`sub` an integer string, `aud`, `iss`, `client_id`, `scope`, `grant_id`, `requested_resource` strings, `exp` / `iat` integers, `is_superadmin` boolean, `organizations` of `{id, slug, name, roles, app_grant}`). `email` and `name` are optional.
+1. SI answered `200` with `active: true` and a body matching the contract (`sub` an integer string, `aud`, `iss`, `client_id`, `scope`, `grant_id`, `requested_resource` strings, `exp` / `iat` integers, `is_superadmin` boolean, `organizations` of `{id, slug, name, roles, app_grant}`, plus `logo_url`). `email` and `name` are optional, and so is `logo_url` (string or null, absent before SI-429): it never fails the body.
 2. `aud` equals this app's canonical resource (`auth.resource`, or `{ resource }` per call), compared canonically (lowercase scheme and host, no default port, one trailing `/` stripped, query kept). SI already refuses tokens for other resources; this is defence in depth. A mismatch also logs a warning.
 3. `exp` is in the future by the local clock.
 
@@ -921,7 +921,7 @@ Request body:
 
 | Method | Path | Contract |
 |---|---|---|
-| `GET` | `/api/membership/users/{user}/organizations` | SI-374, live. Response `{ data: { user: { id }, app: { id, name }, is_superadmin, organizations: [{ id, slug, name, roles, app_grant }] }, meta: { count, generated_at } }`. Errors `401`, `403 app_inactive`, `404 user_not_found`, `429`, `500 misconfigured_key`. 600 req/min per key. |
+| `GET` | `/api/membership/users/{user}/organizations` | SI-374, live. Response `{ data: { user: { id }, app: { id, name }, is_superadmin, organizations: [{ id, slug, name, logo_url, roles, app_grant }] }, meta: { count, generated_at } }`; `logo_url` (string or null) since SI-429. Errors `401`, `403 app_inactive`, `404 user_not_found`, `429`, `500 misconfigured_key`. 600 req/min per key. |
 | `POST` | `/api/membership/audit-events` | SI-379, not live yet. Opt-in. |
 | `POST` | `/api/oauth/introspect` | SI-411, live on main. JSON `{ token }`. `200` `{"active": false}` or the active body ([principal](#the-principal)). Errors `401`, `403 app_inactive`, `422`, `429`, `500 misconfigured_key`. `Cache-Control: no-store`. |
 | `POST` | `/api/verify-session-jwt` | SI Actions (`createSiActions`). JSON `{ token }`; `200 { valid: true, claims }` confirms the hub service token's signature. `400`/`401` are final, anything else is `upstream_unavailable`. Tokens are never cached. Times out after `verifyTimeoutMs` (5s); redirects are not followed. |
@@ -932,7 +932,7 @@ Introspection and grant status share SI's `mcp-introspect` limit: 1200 requests 
 
 Served **by the app** (SI calls them, the SDK only builds the answers): `GET /.well-known/oauth-protected-resource[/<path>]` (`protectedResourceMetadata`) and `GET /.well-known/si-mcp-scopes.json` (`scopeManifestResponse`, SI-419; SI pulls it on row save, by command and daily, and a superadmin approves changes).
 
-The SDK validates the whole `200` body (integer ids, string slug/name/app_grant, string-array roles, `data.user.id` equal to the requested user). Any mismatch is `si_unavailable` / `malformed_response`.
+The SDK validates the whole `200` body (integer ids, string slug/name/app_grant, string-array roles, `data.user.id` equal to the requested user). Any mismatch is `si_unavailable` / `malformed_response`. The exception is `logo_url`: it's optional and never fails the body. Anything but an absolute URL on `baseUrl`'s origin (including a missing value from SI before SI-429) becomes `logoUrl: null`.
 
 ---
 

@@ -1,9 +1,9 @@
 # Changelog
 
-## 1.6.0 — 2026-10-26
+## 1.6.0 — 2026-10-27
 
-Org logos for org pickers (SI-429). Additive: no existing signature or
-behaviour changes. The browser entry is unchanged.
+Org logos for org pickers (SI-429). No runtime behaviour changes for existing
+fields. The browser entry is unchanged.
 
 - `MembershipOrganization` gains `logoUrl: string | null`, so
   `si.membership.get`, `si.membership.requireOrg`,
@@ -11,9 +11,15 @@ behaviour changes. The browser entry is unchanged.
   `organizations` all carry it. It is SI's `logo_url`: the org's icon, else
   its logo, as a public absolute URL on SI's host (no session needed; allow
   that host in your `img-src` CSP), or `null` when the org has none.
-- A missing `logo_url` (SI before SI-429) or a malformed one becomes `null`
-  rather than failing the membership answer. Membership answers cached by an
-  older SDK read back with `logoUrl: null` until they expire.
+- `logoUrl` is only ever an absolute URL on the origin of the client's
+  `baseUrl`. Anything else from SI (missing on SI before SI-429, relative,
+  another host or scheme, credentials in the URL) becomes `null` rather than
+  failing the membership answer. Cached answers are rechecked the same way, and
+  those cached by an older SDK read back with `logoUrl: null` until they expire.
+- TypeScript: `logoUrl` is a required property, so code that builds
+  `MembershipOrganization` objects itself (test fakes, stubs of
+  `si.membership`) must add `logoUrl: null` when upgrading. Code that only
+  reads SDK results needs no change.
 
 ## 1.5.0 — 2026-10-16
 

@@ -115,6 +115,7 @@ interface MembershipOrganization {
      * Public URL of the org's picker image (its icon, else its logo) on SI's
      * host, or `null` when it has none. Loadable without a session; allow SI's
      * host in your `img-src` CSP. Square-ish PNG/JPG of any size: scale it down.
+     * Always an absolute URL on `baseUrl`'s origin: the SDK drops anything else.
      */
     logoUrl: string | null;
     roles: string[];

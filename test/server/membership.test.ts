@@ -210,14 +210,35 @@ describe('membership logoUrl', () => {
     await expect(si.membership.get(456)).resolves.toMatchObject({ organizations: [{ id: 2, logoUrl: null }] });
   });
 
-  it('is null instead of failing the answer when logo_url is malformed', async () => {
-    const orgs = [
-      { id: 2, slug: 'kadiko', name: 'Kadiko', logo_url: 42, roles: ['client'], app_grant: 'organization' },
-      { id: 29, slug: 'supreme-group', name: 'Supreme Group', logo_url: '', roles: ['orgadmin'], app_grant: 'role' },
+  it('is null instead of failing the answer unless it is an absolute URL on the SI origin', async () => {
+    const bad = [
+      42,
+      '',
+      '/org-icon/relative.png',
+      'javascript:alert(1)',
+      'data:image/png;base64,AAAA',
+      'http://si.example.com/org-icon/a.png',
+      'https://evil.example.com/org-icon/a.png',
+      'https://si.example.com.evil.com/a.png',
+      'https://user:pw@si.example.com/a.png',
     ];
+    const orgs = bad.map((logo_url, i) => ({ id: i + 1, slug: `o${i}`, name: 'O', logo_url, roles: [], app_grant: 'organization' }));
     const { si } = client([{ status: 200, body: membershipBody(456, orgs) }]);
     const m = await si.membership.get(456);
-    expect(m.organizations.map((o) => o.logoUrl)).toEqual([null, null]);
+    expect(m.organizations.map((o) => o.logoUrl)).toEqual(bad.map(() => null));
+  });
+
+  it('drops an off-origin logoUrl read back from a shared cache', async () => {
+    const data = {
+      user: { id: 456 },
+      app: { id: 12, name: 'Studio Canvas' },
+      isSuperadmin: false,
+      organizations: [{ id: 2, slug: 'kadiko', name: 'Kadiko', logoUrl: 'https://evil.example.com/a.png', roles: ['client'], appGrant: 'organization' }],
+      generatedAt: '2026-10-02T15:04:05Z',
+    };
+    const cache = { get: async () => ({ v: 1, kind: 'allow', at: Date.now(), data }), set: async () => undefined, delete: async () => undefined };
+    const { si } = client([], { cache, now: () => Date.now() });
+    await expect(si.membership.requireOrg(456, 2)).resolves.toMatchObject({ id: 2, logoUrl: null });
   });
 
   it('is null for an answer cached by an SDK before 1.6.0', async () => {

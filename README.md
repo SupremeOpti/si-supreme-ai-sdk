@@ -1167,9 +1167,9 @@ MIT
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
 
-### 2026-10-26
+### 2026-10-27
 
-- Org logos (1.6.0, SI-429): `MembershipOrganization.logoUrl` (`string | null`), so `si.membership.get`, `requireOrg`, `si.organizations.resolve` and the introspection principal's `organizations` carry SI's public org image URL. Missing or malformed `logo_url` becomes `null` instead of failing the answer; older cached answers read back as `null`. [types.ts](src/server/types.ts), [membership.ts](src/server/membership.ts), [docs/SERVER.md](docs/SERVER.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
+- Org logos (1.6.0, SI-429): `MembershipOrganization.logoUrl` (`string | null`), so `si.membership.get`, `requireOrg`, `si.organizations.resolve` and the introspection principal's `organizations` carry SI's public org image URL. Only an absolute URL on `baseUrl`'s origin is kept; a missing or other `logo_url` becomes `null` instead of failing the answer, and older cached answers read back as `null`. TypeScript: code that builds `MembershipOrganization` objects itself must add `logoUrl`. [types.ts](src/server/types.ts), [membership.ts](src/server/membership.ts), [docs/SERVER.md](docs/SERVER.md), [CHANGELOG.md](CHANGELOG.md). Browser entry unchanged.
 
 ### 2026-10-16
 

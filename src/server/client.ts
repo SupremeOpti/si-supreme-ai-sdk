@@ -76,6 +76,7 @@ export function createSiServerClient(config: SiServerConfig): SiServerClient {
     cache,
     logger,
     now,
+    baseUrl,
     allowTtlSeconds: clampTtl(config.membership?.allowTtlSeconds, MAX_ALLOW_TTL_SECONDS),
     denyTtlSeconds: clampTtl(config.membership?.denyTtlSeconds, MAX_DENY_TTL_SECONDS),
   });
