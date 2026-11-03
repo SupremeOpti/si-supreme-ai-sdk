@@ -1191,6 +1191,7 @@ MIT
 
 ### 2026-11-03
 
+- Publish workflow drops `prepare` / `prepublishOnly` / `prepack` / `postpack` before `npm publish`: npm 10 ran `prepare` despite `--ignore-scripts`, rebuilding `dist/` and failing on old tags (`tsup: not found`). [publish.yml](.github/workflows/publish.yml).
 - Private publishing to GitHub Packages (SI-430): [publish.yml](.github/workflows/publish.yml) publishes the committed `dist/` as `@supremeopti/si-sdk` on each version tag (or by hand for an older tag), after checking the tag matches `package.json` and running the tests. Consumers install it with `.npmrc` and the alias `"@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"`, so imports don't change; edge functions vendor `dist/server.mjs` instead of loading it from jsDelivr. `package.json` URLs moved to `SupremeOpti/si-supreme-ai-sdk` and `publishConfig` to GitHub Packages; `package-lock.json` is now committed. [Installation](#installation), [docs/SERVER.md](docs/SERVER.md#install), [SKILL.md](SKILL.md), [CLAUDE.md](CLAUDE.md). No SDK code change.
 
 ### 2026-10-27
