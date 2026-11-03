@@ -8,15 +8,42 @@ Works in **standalone** apps (email/password login) and **embedded** apps (ifram
 
 ## Installation
 
-```bash
-npm install github:SupremeOpti/si-supreme-ai-sdk
-```
+Published privately to GitHub Packages as `@supremeopti/si-sdk`. Install it under its usual name with an npm alias, so imports stay `@supreme-ai/si-sdk`.
+
+1. Add `.npmrc` at the project root (commit it; the token is read from the environment):
+
+   ```
+   @supremeopti:registry=https://npm.pkg.github.com
+   //npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+   ```
+
+2. Depend on the alias:
+
+   ```json
+   "@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"
+   ```
+
+3. Provide `GITHUB_PACKAGES_TOKEN`, a classic GitHub token with `read:packages`:
+
+| Where | How |
+|---|---|
+| Vercel | Team-wide environment variable `GITHUB_PACKAGES_TOKEN` (all environments, Sensitive), linked to the project. |
+| Laptop | `export GITHUB_PACKAGES_TOKEN=<your token>` before installing, or `npm login --registry=https://npm.pkg.github.com --scope=@supremeopti`. |
+| GitHub Actions | `GITHUB_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}`, after the package grants the repo access (package settings, Manage Actions access). |
+
+Published versions: 1.1.0 and later. `github:SupremeOpti/si-supreme-ai-sdk` installs keep working until the repo goes private, then fail.
 
 Peer dependencies: `react` and `react-dom` (optional if you only use `CreditSystemClient` / `ReportsClient` without hooks).
 
 ```bash
-npm run build   # in this repo, before publishing or linking locally
+npm run build   # in this repo, before linking locally
 ```
+
+### Releasing
+
+1. Bump `version` in `package.json`, rebuild `dist/` (`npm run build`), commit, merge to `main`.
+2. Tag the merge commit with the bare version and push it: `git tag 1.7.0 && git push origin 1.7.0`.
+3. [publish.yml](.github/workflows/publish.yml) checks the tag matches `package.json`, runs the tests, and publishes the committed `dist/` as `@supremeopti/si-sdk`. To republish an older tag, run the workflow by hand with that tag.
 
 ---
 
@@ -976,12 +1003,7 @@ Adapters: `memoryCache()` (fine in production), `memoryLockStore()` (tests/dev o
 
 Errors (all extend `SiServerError`, stable `code`): `OrgAccessDeniedError` (`org_access_denied`), `OrgLockedError` (`org_locked`), `UserGoneError` (`user_not_found`: revoke the connection), `SiUnavailableError` (`si_unavailable`), `MisconfiguredKeyError` (`misconfigured_key`), `AppInactiveError` (`app_inactive`), `LockStoreUnavailableError` (`lock_store_unavailable`), `InvalidArgumentError` (`invalid_argument`), and for `si.auth`: `InvalidTokenError` (`invalid_token`), `InsufficientScopeError` (`insufficient_scope`), `SiValidationError` (`validation_failed`).
 
-Deno / Supabase edge functions import the built ESM by URL, pinned to a commit SHA:
-
-```jsonc
-// supabase/functions/deno.json
-{ "imports": { "@si/server": "https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<40-char-sha>/dist/server.mjs" } }
-```
+Deno / Supabase edge functions vendor the server bundle: copy `dist/server.mjs` and `dist/server.d.mts` of a published version into the app and import them locally. See [docs/SERVER.md](docs/SERVER.md#supabase-edge-functions-deno).
 
 Apps using `si-sdk/server` (bump each on release): none yet. si-canva adopts in SI-380.
 
@@ -1166,6 +1188,10 @@ MIT
 ## Changelog
 
 > Every change to this repo gets an entry here. Newest at the top. See [CLAUDE.md](CLAUDE.md) for the rule.
+
+### 2026-11-03
+
+- Private publishing to GitHub Packages (SI-430): [publish.yml](.github/workflows/publish.yml) publishes the committed `dist/` as `@supremeopti/si-sdk` on each version tag (or by hand for an older tag), after checking the tag matches `package.json` and running the tests. Consumers install it with `.npmrc` and the alias `"@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"`, so imports don't change; edge functions vendor `dist/server.mjs` instead of loading it from jsDelivr. `package.json` URLs moved to `SupremeOpti/si-supreme-ai-sdk` and `publishConfig` to GitHub Packages; `package-lock.json` is now committed. [Installation](#installation), [docs/SERVER.md](docs/SERVER.md#install), [SKILL.md](SKILL.md), [CLAUDE.md](CLAUDE.md). No SDK code change.
 
 ### 2026-10-27
 

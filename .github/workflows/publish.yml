@@ -1,0 +1,75 @@
+# Publishes the SDK to GitHub Packages as @supremeopti/si-sdk.
+#
+# - Pushing a version tag (e.g. 1.7.0) publishes that release.
+# - "Run workflow" with an existing tag republishes an older release
+#   (older tags don't contain this file, so pushing them does nothing).
+#
+# The repo keeps the name @supreme-ai/si-sdk; the package is renamed only at
+# publish time. Consumers alias it back:
+#   "@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"
+#
+# What gets published is the dist/ committed at the tag, not a fresh build,
+# so the registry serves the same files that GitHub installs did.
+
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (e.g. 1.1.0)
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@supremeopti'
+
+      - name: Tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match package.json version $version"
+            exit 1
+          fi
+
+      - name: Committed dist is present
+        run: test -f dist/index.js && test -f dist/index.mjs && test -f dist/index.d.ts
+
+      # Tags from before the lockfile was committed skip this step.
+      - name: Test
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci --ignore-scripts && npm test
+
+      - name: Rename for GitHub Packages
+        run: |
+          npm pkg set name=@supremeopti/si-sdk
+          npm pkg set publishConfig.registry=https://npm.pkg.github.com
+          npm pkg delete publishConfig.access
+          npm pkg set repository.type=git
+          npm pkg set repository.url=git+https://github.com/SupremeOpti/si-supreme-ai-sdk.git
+
+      - name: Publish
+        run: npm publish --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

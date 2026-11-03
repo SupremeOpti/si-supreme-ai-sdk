@@ -27,13 +27,26 @@ If the dev's mental model is "I'll add Supreme on top of my existing auth," corr
 
 ## 2. Install
 
-```bash
-npm install github:SupremeOpti/si-supreme-ai-sdk
+The SDK is a private package on GitHub Packages, `@supremeopti/si-sdk`, installed under the alias `@supreme-ai/si-sdk` so imports don't change.
+
+`.npmrc` at the project root (commit it; never put the token itself in the file):
+
 ```
+@supremeopti:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
+```
+
+`package.json`:
+
+```json
+"@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"
+```
+
+`GITHUB_PACKAGES_TOKEN` is a classic GitHub token with `read:packages`. On Vercel it is a team-wide environment variable; locally, export it before installing. A `401`/`403` on install means the token is missing, lacks `read:packages`, or isn't authorized for the SupremeOpti org.
 
 Peer deps: `react` and `react-dom`. Skip them only if the consumer is pure-Node and uses `CreditSystemClient` / `ReportsClient` directly.
 
-If the consumer is on a strict CI that blocks GitHub-protocol installs, switch to an HTTPS tarball URL or a pinned commit SHA (`github:SupremeOpti/si-supreme-ai-sdk#<sha>`) — never assume the registry has it.
+Don't install from `github:SupremeOpti/si-supreme-ai-sdk`: the repo is going private and those installs will fail.
 
 ---
 
@@ -218,7 +231,7 @@ Use it when the app's **server** must ask SI "can user X use this app in org Y r
 
 - **Server only.** It needs the app's `membership_api` key in `SI_MEMBERSHIP_KEY` (a server secret: never `VITE_*`, never in a client bundle, never forwarded to MCP clients). Importing it in browser code hits a stub that throws.
 - **Node / Next.js:** `import { createSiServerClient } from '@supreme-ai/si-sdk/server'`.
-- **Supabase edge functions (Deno):** import `https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<commit-sha>/dist/server.mjs` via `deno.json` `imports`. Pin a full commit SHA, never a branch or tag.
+- **Supabase edge functions (Deno):** vendor the bundle. Copy `dist/server.mjs` and `dist/server.d.mts` from a published version into `supabase/functions/_vendor/si-sdk-server@<version>.mjs` / `.d.mts` and import them locally (steps in docs/SERVER.md). Don't import from jsDelivr: it can't serve a private repo.
 - **Every org-scoped MCP tool** takes an `organization` argument (slug preferred), calls `si.mcp.scopeToolCall({ userId, clientId, conversationKey, organization, tool, kind })`, scopes its queries with `scope.organization.id`, returns `si.mcp.labelResult(result, scope)`, and on error returns `si.mcp.errorResult(err)`. Don't set `structuredContent` on results (Claude would show the model only that, dropping the text and org banner). Annotate tools with `annotations.read` / `.write` / `.destructive`. Expose `si.mcp.listOrganizationsTool()`.
 - **Do not** add a server-side "current org" / `select_instance` tool, and never key anything on `Mcp-Session-Id` (Claude shares one session across conversations; MCP `2026-07-28` removes sessions). Use `si.mcp.conversationKey(...)`.
 - **Production lock store:** pass `locks: supabaseLockStore(serviceRoleClient)` and apply the SQL from docs/SERVER.md (or `SUPABASE_LOCK_STORE_SQL`). `memoryLockStore()` is for tests.

@@ -14,8 +14,10 @@ Contents: [Install](#install) · [Configuration](#configuration) · [Identity](#
 
 ### Next.js / Node
 
-```bash
-npm install github:SupremeOpti/si-supreme-ai-sdk#<tag-or-sha>
+Install from GitHub Packages with the `.npmrc` and alias in the [README](../README.md#installation):
+
+```json
+"@supreme-ai/si-sdk": "npm:@supremeopti/si-sdk@^1.6.0"
 ```
 
 ```ts
@@ -24,23 +26,25 @@ import { createSiServerClient } from '@supreme-ai/si-sdk/server';
 
 ### Supabase edge functions (Deno)
 
-Deno's `npm:` specifier can't install from GitHub. The server bundle has no imports, so import the built ESM by URL from jsDelivr, **pinned to a commit SHA** (tags are mutable; this is auth code):
+Vendor the server bundle. `dist/server.mjs` is one file with no imports, so a copy in the app needs no token and no network at deploy time, and stays pinned:
 
-```jsonc
-// supabase/functions/deno.json (or import_map.json)
-{
-  "imports": {
-    "@si/server": "https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<40-char-sha>/dist/server.mjs"
-  }
-}
+```bash
+# with the .npmrc from the README and GITHUB_PACKAGES_TOKEN set
+npm pack @supremeopti/si-sdk@1.6.0
+tar -xzf supremeopti-si-sdk-1.6.0.tgz package/dist/server.mjs package/dist/server.d.mts
+mkdir -p supabase/functions/_vendor
+mv package/dist/server.mjs supabase/functions/_vendor/si-sdk-server@1.6.0.mjs
+mv package/dist/server.d.mts supabase/functions/_vendor/si-sdk-server@1.6.0.d.mts
 ```
+
+Add a header comment to the `.mjs` naming the version it came from, then import it locally:
 
 ```ts
-// @ts-types="https://cdn.jsdelivr.net/gh/SupremeOpti/si-supreme-ai-sdk@<40-char-sha>/dist/server.d.mts"
-import { createSiServerClient } from '@si/server';
+// @ts-types="../_vendor/si-sdk-server@1.6.0.d.mts"
+import { createSiServerClient } from '../_vendor/si-sdk-server@1.6.0.mjs';
 ```
 
-Use the SHA of a merged commit on `main` that contains the `dist/` you want. Bump it deliberately, as you would a dependency.
+Bump it deliberately, as you would a dependency: copy the new version's files and update the imports.
 
 ### Environment variables
 
