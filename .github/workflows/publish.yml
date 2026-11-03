@@ -61,8 +61,13 @@ jobs:
         if: hashFiles('package-lock.json') != ''
         run: npm ci --ignore-scripts && npm test
 
+      # npm 10 still runs `prepare` on publish despite --ignore-scripts, which
+      # would rebuild dist/ (and fails on old tags with no devDependencies
+      # installed). Drop the publish lifecycle scripts so the committed dist/
+      # is published as-is.
       - name: Rename for GitHub Packages
         run: |
+          npm pkg delete scripts.prepare scripts.prepublishOnly scripts.prepack scripts.postpack
           npm pkg set name=@supremeopti/si-sdk
           npm pkg set publishConfig.registry=https://npm.pkg.github.com
           npm pkg delete publishConfig.access
