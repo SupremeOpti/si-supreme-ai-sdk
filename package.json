@@ -78,17 +78,16 @@
   ],
   "author": "Supreme AI",
   "license": "MIT",
-  "homepage": "https://github.com/developersupreme/supreme-ai-sdk#readme",
+  "homepage": "https://github.com/SupremeOpti/si-supreme-ai-sdk#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/developersupreme/supreme-ai-sdk.git"
+    "url": "git+https://github.com/SupremeOpti/si-supreme-ai-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/developersupreme/supreme-ai-sdk/issues"
+    "url": "https://github.com/SupremeOpti/si-supreme-ai-sdk/issues"
   },
   "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://npm.pkg.github.com"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

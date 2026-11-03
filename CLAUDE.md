@@ -4,7 +4,7 @@ Agent instructions for working in this repo (`@supreme-ai/si-sdk`).
 
 ## Project shape
 
-- TypeScript SDK published from GitHub (`github:SupremeOpti/si-supreme-ai-sdk`).
+- TypeScript SDK published privately to GitHub Packages as `@supremeopti/si-sdk` by [publish.yml](.github/workflows/publish.yml) on each version tag. The repo keeps the name `@supreme-ai/si-sdk`; consumers install it under that name with an npm alias (see the README's Installation).
 - Source lives under [src/](src/) and is split into:
   - [src/core/](src/core/) — imperative clients (`CreditSystemClient`, `ReportsClient`, `PersonasClient`).
   - [src/react/](src/react/) — hooks and provider.
